@@ -13,7 +13,7 @@ export function shuffleArray(array) {
     
     // 配列の末尾から開始して、各要素をランダムな位置と交換
     while (currentIndex !== 0) {
-        // 残りの要素からランダムに選択
+        // 残りの要素からランダム  に選択
         randomIndex = Math.floor(Math.random() * currentIndex);
         currentIndex--;
         
