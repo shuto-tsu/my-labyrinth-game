@@ -1,16 +1,35 @@
-// src/components/PlayScreen.jsx
+/**
+ * プレイ画面コンポーネント
+ * ゲーム進行中のメイン画面：プレイヤー移動、チャット、戦闘、目標管理など
+ */
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { getFirestore, doc, getDoc, updateDoc, serverTimestamp, arrayUnion, arrayRemove, increment, Timestamp, runTransaction, collection, addDoc, query, orderBy, limit } from 'firebase/firestore';
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Eye, EyeOff, MessageSquare, Send, Users, User, Settings, Play, Info, HelpCircle, CheckCircle, XCircle, Swords, Shield, Crown, RefreshCw, ListChecks, MinusCircle, PlusCircle, Award, Target, Clock, Users2, Shuffle, Handshake, Zap, Search, Move, Hourglass, ThumbsUp, ThumbsDown, Flag, Skull, MapPin, UserCheck, UserX, ShieldCheck, ShieldOff, InfoIcon, AlertTriangle, GitPullRequestArrow, Sparkles, TimerIcon, TrendingUp, TrendingDown, Trophy, Megaphone, MicOff } from 'lucide-react';
+import {
+    doc, getDoc, updateDoc, serverTimestamp, arrayUnion, arrayRemove,
+    orderBy, limit, runTransaction, Timestamp, increment, collection, addDoc, query, onSnapshot
+} from 'firebase/firestore';
+import {
+    ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Eye, EyeOff, MessageSquare, Send, Users, User,
+    CheckCircle, XCircle, Swords, RefreshCw, ListChecks,
+    MinusCircle, PlusCircle, Award, Target, Clock, Users2, Handshake, Zap, Search, Move,
+    Hourglass, ThumbsUp, ThumbsDown, Skull, MapPin, UserCheck, UserX, ShieldCheck, ShieldOff,
+    Megaphone, MicOff, Trophy
+} from 'lucide-react';
 
 import { db, appId } from '../firebase';
 import MazeGrid from './MazeGrid';
-import BattleModal from './BattleModal'; // Assuming standard battle modal is separate
+import BattleModal from './BattleModal';
 import GameOverModal from './GameOverModal';
-import { STANDARD_GRID_SIZE, EXTRA_GRID_SIZE, NEGOTIATION_TYPES, SABOTAGE_TYPES, DECLARATION_PHASE_DURATION, CHAT_PHASE_DURATION, RESULT_PUBLICATION_DURATION, ACTION_EXECUTION_DELAY, EXTRA_MODE_TOTAL_TIME_LIMIT, EXTRA_MODE_PERSONAL_TIME_LIMIT, PERSONAL_TIME_PENALTY_INTERVAL, PERSONAL_TIME_PENALTY_POINTS, DECLARATION_TIMEOUT_PENALTY, ALLIANCE_VIOLATION_PENALTY, SPECIAL_EVENT_INTERVAL_ROUNDS, SPECIAL_EVENTS } from '../constants';
-import { formatTime, isPathPossible, shuffleArray } from '../utils';
+import {
+    STANDARD_GRID_SIZE, EXTRA_GRID_SIZE, NEGOTIATION_TYPES, SABOTAGE_TYPES,
+    DECLARATION_PHASE_DURATION, CHAT_PHASE_DURATION, RESULT_PUBLICATION_DURATION, ACTION_EXECUTION_DELAY,
+    EXTRA_MODE_PERSONAL_TIME_LIMIT, PERSONAL_TIME_PENALTY_INTERVAL,
+    PERSONAL_TIME_PENALTY_POINTS, DECLARATION_TIMEOUT_PENALTY, ALLIANCE_VIOLATION_PENALTY,
+    SPECIAL_EVENT_INTERVAL_ROUNDS, SPECIAL_EVENTS // SECRET_OBJECTIVES, WALL_COUNT are used in other files
+} from '../constants';
+import { formatTime, isPathPossible } from '../utils';
 
-const PlayScreen = ({ userId, setScreen, gameMode }) => {
+const PlayScreen = ({ userId, setScreen, gameMode, debugMode }) => {
     const [gameId, setGameId] = useState(null);
     const [gameData, setGameData] = useState(null);
     const [myPlayerState, setMyPlayerState] = useState(null);
@@ -22,7 +41,7 @@ const PlayScreen = ({ userId, setScreen, gameMode }) => {
     const [chatMessages, setChatMessages] = useState([]);
     const [chatInput, setChatInput] = useState("");
     const chatLogRef = useRef(null);
-    const [isBattleModalOpen, setIsBattleModalOpen] = useState(false); // For standard mode battle
+    const [isBattleModalOpen, setIsBattleModalOpen] = useState(false);
     const [battleOpponentId, setBattleOpponentId] = useState("");
     const [gameType, setGameType] = useState('standard');
     const [phaseTimeLeft, setPhaseTimeLeft] = useState(null);
@@ -38,17 +57,362 @@ const PlayScreen = ({ userId, setScreen, gameMode }) => {
     const [sharedScoutLogs, setSharedScoutLogs] = useState([]);
     const personalTimerIntervalRef = useRef(null);
     const [isGameOverModalOpen, setIsGameOverModalOpen] = useState(false);
-    const [actionLog, setActionLog] = useState([]);
+    // const [actionLogDisplay, setActionLogDisplay] = useState([]); // Using gameData.actionLog directly
 
+    const [selectedMoveTarget, setSelectedMoveTarget] = useState(null);
+    const [isSelectingMoveTarget, setIsSelectingMoveTarget] = useState(false);
 
-    useEffect(() => { if (chatLogRef.current) chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight; }, [chatMessages]);
+    // デバッグモード用のプレイヤー切り替え機能
+    const [debugCurrentPlayerId, setDebugCurrentPlayerId] = useState(userId);
+    const [debugPlayerStates, setDebugPlayerStates] = useState({});
+    const [debugMazeData, setDebugMazeData] = useState({});
+
+    // 実際に使用するplayerStateとuserIdを決定
+    const effectiveUserId = debugMode ? debugCurrentPlayerId : userId;
+    const effectivePlayerState = debugMode ? debugPlayerStates[debugCurrentPlayerId] : myPlayerState;
+
+    // 追加: 不足している変数の定義
+    const isMyStandardTurn = gameData?.currentTurnPlayerId === effectiveUserId && gameType === 'standard';
+    const inStandardBattleBetting = effectivePlayerState?.inBattleWith && gameType === 'standard';
+
+    // 迷路データの読み込み
     useEffect(() => {
-        const storedGameId = localStorage.getItem('labyrinthGameId');
-        const storedGameType = localStorage.getItem('labyrinthGameType') || 'standard';
-        setGameType(storedGameType);
-        if (storedGameId) setGameId(storedGameId);
-        else setScreen('lobby');
-    }, [setScreen]);
+        if (!gameData || !effectivePlayerState) return;
+        
+        console.log("Loading maze data for game type:", gameType);
+        console.log("Game data:", gameData);
+        console.log("Effective player state:", effectivePlayerState);
+        
+        // 攻略する迷路の読み込み
+        if (effectivePlayerState.assignedMazeOwnerId && gameData.mazes) {
+            const assignedMaze = gameData.mazes[effectivePlayerState.assignedMazeOwnerId];
+            if (assignedMaze) {
+                console.log("Maze to play loaded:", assignedMaze);
+                setMazeToPlayData(assignedMaze);
+            } else {
+                console.warn("Assigned maze not found for:", effectivePlayerState.assignedMazeOwnerId);
+                setMessage(`割り当てられた迷路が見つかりません: ${effectivePlayerState.assignedMazeOwnerId}`);
+            }
+        }
+        
+        // 自分が作成した迷路の読み込み（スタンダードモードのみ）
+        if (gameType === 'standard' && gameData.mazes?.[effectiveUserId]) {
+            console.log("My created maze loaded:", gameData.mazes[effectiveUserId]);
+            setMyCreatedMazeData(gameData.mazes[effectiveUserId]);
+        }
+        
+    }, [gameData, effectivePlayerState, effectiveUserId, gameType, setMessage]);
+
+    // デバッグモード時に全プレイヤーの状態を同期
+    useEffect(() => {
+        if (debugMode && gameData?.playerStates) {
+            setDebugPlayerStates(gameData.playerStates);
+            console.log("🔧 [DEBUG] Player states updated:", gameData.playerStates);
+        }
+    }, [debugMode, gameData?.playerStates]);
+
+    // プレイヤー切り替え時に迷路データを更新
+    useEffect(() => {
+        if (debugMode && gameData?.mazes) {
+            setDebugMazeData(gameData.mazes);
+        }
+    }, [debugMode, gameData?.mazes, debugCurrentPlayerId]);
+
+    // Standard mode specific handlers
+    const handleStandardMove = async (direction) => {
+        // デバッグモード時は現在選択中のプレイヤーで移動、通常時は自分のターンのみ
+        const canMove = debugMode ? true : (isMyStandardTurn && !inStandardBattleBetting);
+        if (!canMove) return;
+        
+        const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
+        const { r: currentR, c: currentC } = effectivePlayerState.position;
+        
+        let newR = currentR;
+        let newC = currentC;
+        
+        switch(direction) {
+            case 'up': newR--; break;
+            case 'down': newR++; break;
+            case 'left': newC--; break;
+            case 'right': newC++; break;
+            default: return;
+        }
+        
+        const gridSize = mazeToPlayData?.gridSize || STANDARD_GRID_SIZE;
+        
+        // 境界チェック
+        if (newR < 0 || newR >= gridSize || newC < 0 || newC >= gridSize) {
+            setMessage("盤外への移動はできません。");
+            return;
+        }
+        
+        // 壁チェック - 実際の迷路の壁構造をチェック
+        const walls = mazeToPlayData?.walls || [];
+        const isBlocked = walls.some(wall => {
+            if (wall.type === 'horizontal') {
+                // 水平壁：上下移動をブロック
+                if (direction === 'up' && wall.r === currentR && wall.c === currentC) return true;
+                if (direction === 'down' && wall.r === newR && wall.c === newC) return true;
+            } else if (wall.type === 'vertical') {
+                // 垂直壁：左右移動をブロック
+                if (direction === 'left' && wall.r === currentR && wall.c === currentR) return true;
+                if (direction === 'right' && wall.r === currentR && wall.c === newC) return true;
+            }
+            return false;
+        });
+        
+        if (isBlocked) {
+            setMessage("壁に阻まれて移動できません。");
+            return;
+        }
+        
+        try {
+            const updates = {
+                [`playerStates.${effectiveUserId}.position`]: { r: newR, c: newC },
+                [`playerStates.${effectiveUserId}.lastMoveTime`]: serverTimestamp(),
+            };
+            
+            // 新しいセルの発見ボーナス
+            if (!effectivePlayerState.revealedCells[`${newR}-${newC}`]) {
+                updates[`playerStates.${effectiveUserId}.score`] = increment(1);
+                updates[`playerStates.${effectiveUserId}.revealedCells.${newR}-${newC}`] = true;
+                setMessage(`(${newR},${newC})に移動！ +1pt`);
+            } else {
+                setMessage(`(${newR},${newC})に移動しました。`);
+            }
+            
+            // ゴール判定
+            if (mazeToPlayData && newR === mazeToPlayData.goal.r && newC === mazeToPlayData.goal.c && !effectivePlayerState.goalTime) {
+                updates[`playerStates.${effectiveUserId}.goalTime`] = serverTimestamp();
+                updates.goalCount = increment(1);
+                setMessage("ゴール達成！");
+            }
+            
+            // デバッグモード時は自動的にターン切り替え
+            if (debugMode && gameData?.turnOrder) {
+                const currentTurnIndex = gameData.turnOrder.indexOf(gameData.currentTurnPlayerId);
+                const nextTurnIndex = (currentTurnIndex + 1) % gameData.turnOrder.length;
+                const nextPlayerId = gameData.turnOrder[nextTurnIndex];
+                
+                updates.currentTurnPlayerId = nextPlayerId;
+                updates.turnNumber = increment(1);
+                
+                console.log(`🔧 [DEBUG] Auto turn switch: ${gameData.currentTurnPlayerId.substring(0,8)}... → ${nextPlayerId.substring(0,8)}...`);
+            }
+            
+            await updateDoc(gameDocRef, updates);
+            
+        } catch (error) {
+            console.error("Error moving:", error);
+            setMessage("移動に失敗しました。");
+        }
+    };
+
+    const handleStandardBattleBet = async (betAmount) => {
+        // スタンダードモードのバトル処理
+        console.log("Battle bet:", betAmount);
+    };
+
+    // handleTrapCoordinateSelect関数の追加
+    const handleTrapCoordinateSelect = (r, c) => {
+        if (isPlacingTrap && selectedAction === 'sabotage' && sabotageType === 'trap') {
+            setTrapPlacementCoord({ r, c });
+            setIsPlacingTrap(false);
+            setMessage(`トラップ設置座標 (${r}, ${c}) を選択しました。`);
+        }
+    };
+
+    // セルクリック時の処理を統合
+    const handleCellClick = (r, c) => {
+        if (gameType === 'extra') {
+            // エクストラモード時の処理
+            if (isSelectingMoveTarget && selectedAction === 'move') {
+                handleCellClickForMove(r, c);
+            } else if (isPlacingTrap && selectedAction === 'sabotage' && sabotageType === 'trap') {
+                handleTrapCoordinateSelect(r, c);
+            }
+        } else if (gameType === 'standard') {
+            // スタンダードモード時の移動処理
+            const canMove = debugMode ? true : (isMyStandardTurn && !inStandardBattleBetting);
+            if (canMove) {
+                const { r: currentR, c: currentC } = effectivePlayerState.position;
+                const isAdjacent = (Math.abs(r - currentR) === 1 && c === currentC) || 
+                                  (Math.abs(c - currentC) === 1 && r === currentR);
+                
+                if (isAdjacent) {
+                    if (r < currentR) handleStandardMove('up');
+                    else if (r > currentR) handleStandardMove('down');
+                    else if (c < currentC) handleStandardMove('left');
+                    else if (c > currentC) handleStandardMove('right');
+                } else {
+                    setMessage("隣接するセルにのみ移動できます。");
+                }
+            }
+        }
+    };
+
+    // キーボード操作の追加
+    useEffect(() => {
+        const handleKeyPress = (event) => {
+            if (gameType === 'standard' && isMyStandardTurn && !inStandardBattleBetting) {
+                switch(event.key) {
+                    case 'ArrowUp': 
+                    case 'w': 
+                    case 'W':
+                        event.preventDefault();
+                        handleStandardMove('up');
+                        break;
+                    case 'ArrowDown': 
+                    case 's': 
+                    case 'S':
+                        event.preventDefault();
+                        handleStandardMove('down');
+                        break;
+                    case 'ArrowLeft': 
+                    case 'a': 
+                    case 'A':
+                        event.preventDefault();
+                        handleStandardMove('left');
+                        break;
+                    case 'ArrowRight': 
+                    case 'd': 
+                    case 'D':
+                        event.preventDefault();
+                        handleStandardMove('right');
+                        break;
+                }
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyPress);
+        return () => window.removeEventListener('keydown', handleKeyPress);
+    }, [gameType, isMyStandardTurn, inStandardBattleBetting, handleStandardMove]);
+
+    // ゲームデータを読み込む useEffect を修正
+    useEffect(() => {
+        if (!gameId) {
+            const savedGameId = localStorage.getItem('labyrinthGameId');
+            const savedGameType = localStorage.getItem('labyrinthGameType');
+            if (savedGameId && savedGameType) {
+                setGameId(savedGameId);
+                setGameType(savedGameType);
+                return;
+            } else {
+                setScreen('lobby');
+                return;
+            }
+        }
+
+        const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
+        const unsubscribe = onSnapshot(gameDocRef,
+            (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    console.log("Game data loaded:", data);
+                    setGameData(data);
+                    
+                    const myState = data.playerStates?.[userId];
+                    console.log("My player state:", myState);
+                    setMyPlayerState(myState);
+                    
+                    // デバッグモード時は全プレイヤーの状態を保存
+                    if (debugMode && data.playerStates) {
+                        setDebugPlayerStates(data.playerStates);
+                        console.log("🔧 [DEBUG] All player states updated:", data.playerStates);
+                    }
+                    
+                    if (data.status === 'finished') {
+                        setIsGameOverModalOpen(true);
+                        return;
+                    }
+                    
+                    // 迷路データの読み込みを修正
+                    if (myState?.assignedMazeOwnerId && data.mazes) {
+                        console.log("Assigned maze owner:", myState.assignedMazeOwnerId);
+                        console.log("Available mazes:", Object.keys(data.mazes));
+                        
+                        const assignedMaze = data.mazes[myState.assignedMazeOwnerId];
+                        if (assignedMaze) {
+                            console.log("Maze to play loaded:", assignedMaze);
+                            setMazeToPlayData(assignedMaze);
+                        } else {
+                            console.warn("Assigned maze not found for:", myState.assignedMazeOwnerId);
+                            setMessage(`割り当てられた迷路が見つかりません: ${myState.assignedMazeOwnerId}`);
+                        }
+                    }
+                    
+                    // 自分が作成した迷路の読み込み
+                    if (data.mazes?.[userId]) {
+                        console.log("My created maze loaded:", data.mazes[userId]);
+                        setMyCreatedMazeData(data.mazes[userId]);
+                        
+                        // 自分の迷路を攻略している相手プレイヤーを探す
+                        const challenger = Object.entries(data.playerStates || {})
+                            .find(([pid, ps]) => ps.assignedMazeOwnerId === userId && pid !== userId);
+                        
+                        if (challenger) {
+                            setPlayerSolvingMyMaze({ id: challenger[0], ...challenger[1] });
+                            console.log("Player solving my maze:", challenger[0]);
+                        } else {
+                            setPlayerSolvingMyMaze(null);
+                        }
+                    } else {
+                        console.warn("My created maze not found for userId:", userId);
+                    }
+                } else {
+                    console.error("Game document does not exist");
+                    setMessage("ゲームが見つかりません。ロビーに戻ります。");
+                    setTimeout(() => setScreen('lobby'), 3000);
+                }
+            },
+            (error) => {
+                console.error("Error loading game data:", error);
+                setMessage("ゲームデータの読み込みに失敗しました。ロビーに戻ります。");
+                setTimeout(() => setScreen('lobby'), 3000);
+            }
+        );
+        
+        return () => unsubscribe();
+    }, [gameId, userId, setScreen]);
+
+    // handleCellClickForMove関数の追加
+    const handleCellClickForMove = (r, c) => {
+        if (isSelectingMoveTarget && selectedAction === 'move') {
+            // 現在位置からの移動可能性をチェック（隣接セルかどうか）
+            const { r: currentR, c: currentC } = myPlayerState.position;
+            const isAdjacent = (Math.abs(r - currentR) === 1 && c === currentC) || 
+                              (Math.abs(c - currentC) === 1 && r === currentR);
+            
+            // グリッドサイズを適切に取得
+            const gridSize = mazeToPlayData?.gridSize || currentGridSize;
+            
+            if (isAdjacent && r >= 0 && r < gridSize && c >= 0 && c < gridSize) {
+                setSelectedMoveTarget({ r, c });
+                setIsSelectingMoveTarget(false);
+                setMessage(`移動先 (${r}, ${c}) を選択しました。`);
+            } else {
+                setMessage("隣接するセルにのみ移動できます。");
+            }
+        }
+    };
+
+    // チャットメッセージを読み込む useEffect を追加
+    useEffect(() => {
+        if (!gameId || !appId) return;
+        
+        const chatCollRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/chatMessages`);
+        const chatQuery = query(chatCollRef, orderBy('timestamp', 'asc'), limit(50));
+        
+        const unsubscribe = onSnapshot(chatQuery, (snapshot) => {
+            const messages = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setChatMessages(messages);
+        });
+        
+        return () => unsubscribe();
+    }, [gameId, appId]);
 
     const currentGridSize = gameType === 'extra' ? EXTRA_GRID_SIZE : STANDARD_GRID_SIZE;
 
@@ -58,34 +422,56 @@ const PlayScreen = ({ userId, setScreen, gameMode }) => {
         try {
             await addDoc(chatCollRef, { senderId: "system", senderName: "システム", text: text, timestamp: serverTimestamp() });
         } catch (error) { console.error("Error sending system chat message:", error); }
-    }, [gameId, appId]);
+    }, [gameId]);
 
-    const finalizeGameExtraMode = useCallback(async (gId, currentGData) => { /* ... (Implementation from previous step) ... */ 
+    const finalizeGameExtraMode = useCallback(async (gId, currentGData) => {
         if (!gId || !currentGData || currentGData.status === 'finished') return;
         sendSystemChatMessage("ゲーム終了！最終ポイント計算中...");
         const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gId);
+        
         try {
             await runTransaction(db, async (transaction) => {
                 const freshGameSnap = await transaction.get(gameDocRef);
-                if (!freshGameSnap.exists()) throw "Game not found for finalization!";
+                if (!freshGameSnap.exists()) throw new Error("Game not found for finalization!");
                 const freshGData = freshGameSnap.data();
                 if (freshGData.status === 'finished') return; 
+
                 let finalPlayerStates = JSON.parse(JSON.stringify(freshGData.playerStates)); 
+
                 freshGData.players.forEach(pid => {
                     const pState = finalPlayerStates[pid];
                     if (pState.personalTimeUsed > EXTRA_MODE_PERSONAL_TIME_LIMIT) {
                         const overtimeSeconds = pState.personalTimeUsed - EXTRA_MODE_PERSONAL_TIME_LIMIT;
                         const penaltyCount = Math.floor(overtimeSeconds / PERSONAL_TIME_PENALTY_INTERVAL);
-                        if (penaltyCount > 0) { const totalPenalty = penaltyCount * PERSONAL_TIME_PENALTY_POINTS; pState.score += totalPenalty; }
+                        if (penaltyCount > 0) {
+                            const totalPenalty = penaltyCount * PERSONAL_TIME_PENALTY_POINTS;
+                            pState.score += totalPenalty;
+                        }
                     }
                     finalPlayerStates[pid].scoreBeforeFullAllianceBonus = pState.score;
                 });
-                let rankedPlayers = freshGData.players.map(pid => ({ id: pid, score: finalPlayerStates[pid].score || 0, goalTime: finalPlayerStates[pid].goalTime ? (finalPlayerStates[pid].goalTime.toMillis ? finalPlayerStates[pid].goalTime.toMillis() : finalPlayerStates[pid].goalTime) : Infinity, allianceId: finalPlayerStates[pid].allianceId, secretObjective: finalPlayerStates[pid].secretObjective, betrayedAllies: finalPlayerStates[pid].betrayedAllies || [], })).sort((a, b) => { if (a.goalTime !== b.goalTime) return a.goalTime - b.goalTime; return b.score - a.score; });
+
+                let rankedPlayers = freshGData.players.map(pid => ({
+                    id: pid,
+                    score: finalPlayerStates[pid].score || 0,
+                    goalTime: finalPlayerStates[pid].goalTime ? (finalPlayerStates[pid].goalTime.toMillis ? finalPlayerStates[pid].goalTime.toMillis() : finalPlayerStates[pid].goalTime) : Infinity,
+                    allianceId: finalPlayerStates[pid].allianceId,
+                    secretObjective: finalPlayerStates[pid].secretObjective,
+                    betrayedAllies: finalPlayerStates[pid].betrayedAllies || [],
+                })).sort((a, b) => {
+                    if (a.goalTime !== b.goalTime) return a.goalTime - b.goalTime;
+                    return b.score - a.score; 
+                });
                 rankedPlayers.forEach((p, index) => { finalPlayerStates[p.id].rank = index + 1; });
+                
                 const goalPointsExtra = [50, 30, 20, 10];
-                rankedPlayers.forEach((p, index) => { if (p.goalTime !== Infinity) { finalPlayerStates[p.id].score += goalPointsExtra[index] || 0; } });
+                rankedPlayers.forEach((p, index) => {
+                    if (p.goalTime !== Infinity) { finalPlayerStates[p.id].score += goalPointsExtra[index] || 0; }
+                });
+
                 freshGData.players.forEach(pid => {
-                    const pState = finalPlayerStates[pid]; const objective = pState.secretObjective;
+                    const pState = finalPlayerStates[pid]; 
+                    const objective = pState.secretObjective;
                     if (objective && !objective.achieved && objective.gameEndCondition) {
                         let achievedNow = false;
                         switch(objective.id) {
@@ -93,569 +479,1115 @@ const PlayScreen = ({ userId, setScreen, gameMode }) => {
                             case "COMP_SOLO_TOP3": if (!pState.allianceId && pState.rank <= 3) achievedNow = true; break; 
                             case "COOP_ALLY_TOP2": if (pState.allianceId && objective.targetPlayerId && finalPlayerStates[objective.targetPlayerId]?.allianceId === pState.allianceId && pState.rank <= 2 && finalPlayerStates[objective.targetPlayerId]?.rank <= 2) achievedNow = true; break;
                             case "SAB_BETRAY_AND_WIN": if (pState.betrayedAllies.length > 0) { const higherThanAllBetrayed = pState.betrayedAllies.every(bAllyId => finalPlayerStates[bAllyId] ? pState.rank < finalPlayerStates[bAllyId].rank : true); if (higherThanAllBetrayed) achievedNow = true; } break;
+                            default: break;
                         }
                         if (achievedNow) { pState.score += objective.points; pState.secretObjective.achieved = true; /* systemMsg */ }
                     }
-                    if (pState.allianceId) { const currentAlliance = freshGData.alliances.find(a => a.id === pState.allianceId && a.status !== 'betrayed'); if (currentAlliance) { const higherAlly = currentAlliance.members.find(memberId => memberId !== pid && finalPlayerStates[memberId] && finalPlayerStates[memberId].rank < pState.rank); if (higherAlly) { pState.score += 10; /* systemMsg */ } } }
-                    const wasEverAllied = freshGData.alliances.some(a => a.members.includes(pid)); if (pState.rank === 1 && !wasEverAllied) { pState.score += 25; /* systemMsg */ }
+                    if (pState.allianceId) {
+                        const currentAlliance = freshGData.alliances.find(a => a.id === pState.allianceId && a.status !== 'betrayed'); 
+                        if (currentAlliance) {
+                            const higherAlly = currentAlliance.members.find(memberId => memberId !== pid && finalPlayerStates[memberId] && finalPlayerStates[memberId].rank < pState.rank);
+                            if (higherAlly) { pState.score += 10; /* systemMsg */ }
+                        }
+                    }
+                    const wasEverAllied = freshGData.alliances.some(a => a.members.includes(pid)); 
+                    if (pState.rank === 1 && !wasEverAllied) { pState.score += 25; /* systemMsg */ }
                 });
+                
                 const fullAlliances = freshGData.alliances.filter(a => a.type === 'full_alliance' && a.status !== 'betrayed');
                 fullAlliances.forEach(alliance => {
-                    const memberStatesInAlliance = alliance.members.map(pid => finalPlayerStates[pid]).filter(Boolean);
-                    if (memberStatesInAlliance.length > 0) {
-                        const totalScoreOfMembersForDistribution = memberStatesInAlliance.reduce((sum, pState) => sum + (pState.scoreBeforeFullAllianceBonus !== undefined ? pState.scoreBeforeFullAllianceBonus : pState.score), 0);
+                    const memberPidsInAlliance = alliance.members.filter(mId => finalPlayerStates[mId]); 
+                    if (memberPidsInAlliance.length > 0) {
+                        const totalScoreOfMembersForDistribution = memberPidsInAlliance.reduce((sum, pid_member) => sum + (finalPlayerStates[pid_member].scoreBeforeFullAllianceBonus !== undefined ? finalPlayerStates[pid_member].scoreBeforeFullAllianceBonus : finalPlayerStates[pid_member].score), 0);
                         const pointsToDistribute = Math.floor(totalScoreOfMembersForDistribution * 0.5);
-                        const sharePerMember = memberStatesInAlliance.length > 0 ? Math.floor(pointsToDistribute / memberStatesInAlliance.length) : 0;
-                        memberStatesInAlliance.forEach(pState => { const originalScoreForCalc = pState.scoreBeforeFullAllianceBonus !== undefined ? pState.scoreBeforeFullAllianceBonus : pState.score; finalPlayerStates[pState.id].score = Math.floor(originalScoreForCalc * 0.5) + sharePerMember; });
+                        const sharePerMember = memberPidsInAlliance.length > 0 ? Math.floor(pointsToDistribute / memberPidsInAlliance.length) : 0;
+                        
+                        memberPidsInAlliance.forEach(pid_member => {
+                            const originalScoreForCalc = finalPlayerStates[pid_member].scoreBeforeFullAllianceBonus !== undefined ? finalPlayerStates[pid_member].scoreBeforeFullAllianceBonus : finalPlayerStates[pid_member].score;
+                            finalPlayerStates[pid_member].score = Math.floor(originalScoreForCalc * 0.5) + sharePerMember;
+                        });
                     }
                 });
-                transaction.update(gameDocRef, { playerStates: finalPlayerStates, status: "finished", currentExtraModePhase: "gameOver", phaseTimerEnd: null, currentActionPlayerId: null, });
+
+                transaction.update(gameDocRef, {
+                    playerStates: finalPlayerStates, status: "finished",
+                    currentExtraModePhase: "gameOver", phaseTimerEnd: null, currentActionPlayerId: null,
+                });
             });
-        } catch (error) { console.error("Error finalizing game:", error); sendSystemChatMessage("ゲーム終了処理エラー: " + error.message); }
-    }, [appId, sendSystemChatMessage]);
+        } catch (error) {
+            console.error("Error finalizing game:", error);
+            sendSystemChatMessage("ゲーム終了処理エラー: " + error.message);
+        }
+    }, [sendSystemChatMessage, gameType]);
 
     const advanceExtraModePhase = useCallback(async (gId, currentGData) => { 
         if (!gId || !currentGData || currentGData.gameType !== 'extra' || currentGData.status === 'finished') return;
         const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gId);
-        let updates = {}; let nextPhase = currentGData.currentExtraModePhase; let nextPhaseTimer = null; let nextActionPlayerId = null; let newRoundActionOrder = currentGData.roundActionOrder || [];
-        try {
-            if (currentGData.currentExtraModePhase === 'declaration') {
-                nextPhase = 'priorityResolution'; const declaredActions = {...currentGData.declarations} || {}; // Clone to modify
-                currentGData.players.forEach(pid => {
-                    if (!declaredActions[pid]?.type) {
-                        declaredActions[pid] = { type: 'wait', autoDeclared: true, submittedAt: serverTimestamp() };
-                        updates[`playerStates.${pid}.score`] = increment(DECLARATION_TIMEOUT_PENALTY);
-                        sendSystemChatMessage(`${pid.substring(0,5)}は時間切れで「待機」扱い、ペナルティ${DECLARATION_TIMEOUT_PENALTY}pt。`);
+        let updates = {}; 
+        let nextPhase = currentGData.currentExtraModePhase;
+        
+        // フェーズ進行ロジックを実装
+        switch (currentGData.currentExtraModePhase) {
+            case 'declaration':
+                // 宣言フェーズから実行フェーズへ
+                const allDeclared = currentGData.players.every(pid => 
+                    currentGData.playerStates[pid]?.hasDeclaredThisTurn
+                );
+                
+                if (allDeclared) {
+                    nextPhase = 'actionExecution';
+                    const firstActionPlayer = currentGData.players[0];
+                    updates = {
+                        currentExtraModePhase: nextPhase,
+                        currentActionPlayerId: firstActionPlayer,
+                        phaseTimerEnd: Timestamp.fromMillis(Date.now() + ACTION_EXECUTION_DELAY)
+                    };
+                    sendSystemChatMessage("全員の宣言が完了！アクション実行フェーズに移行します。");
+                }
+                break;
+                
+            case 'actionExecution':
+                // 次のプレイヤーのアクション実行、または次のラウンドへ
+                const currentPlayerIndex = currentGData.players.indexOf(currentGData.currentActionPlayerId);
+                const nextPlayerIndex = currentPlayerIndex + 1;
+                
+                if (nextPlayerIndex < currentGData.players.length) {
+                    // 次のプレイヤーのアクション実行
+                    const nextActionPlayer = currentGData.players[nextPlayerIndex];
+                    updates = {
+                        currentActionPlayerId: nextActionPlayer,
+                        phaseTimerEnd: Timestamp.fromMillis(Date.now() + ACTION_EXECUTION_DELAY)
+                    };
+                } else {
+                    // 全員のアクション実行完了、次のラウンドへ
+                    const newRoundNumber = (currentGData.roundNumber || 1) + 1;
+                    
+                    // ゲーム終了判定
+                    const goaledPlayers = currentGData.players.filter(pid => 
+                        currentGData.playerStates[pid]?.goalTime
+                    );
+                    
+                    if (goaledPlayers.length >= Math.ceil(currentGData.players.length / 2) || 
+                        newRoundNumber > 20) { // 最大20ラウンド
+                        await finalizeGameExtraMode(gId, currentGData);
+                        return;
                     }
-                });
-                updates.declarations = declaredActions; 
-                const priorities = { negotiate: 1, sabotage: 2, scout: 3, move: 4, wait: 5 };
-                newRoundActionOrder = currentGData.players
-                    .filter(pid => declaredActions[pid]?.type)
-                    .map(pid => ({ playerId: pid, action: declaredActions[pid], priority: priorities[declaredActions[pid].type] || 99, boost: currentGData.playerStates[pid]?.temporaryPriorityBoost || 0, }))
-                    .sort((a, b) => (a.priority - a.boost) - (b.priority - b.boost) || (a.action.submittedAt?.toMillis() || Date.now()) - (b.action.submittedAt?.toMillis() || Date.now())) 
-                    .map(a => a.playerId);
-                updates.roundActionOrder = newRoundActionOrder;
-                currentGData.players.forEach(pid => { updates[`playerStates.${pid}.temporaryPriorityBoost`] = 0; });
-                if (newRoundActionOrder.length > 0) { nextPhase = 'actionExecution'; nextActionPlayerId = newRoundActionOrder[0]; } else { nextPhase = 'chat'; nextPhaseTimer = Timestamp.fromMillis(Date.now() + CHAT_PHASE_DURATION * 1000); }
-                sendSystemChatMessage(`優先度決定完了。実行順: ${newRoundActionOrder.map(p=>p.substring(0,5)).join(', ') || 'アクションなし'}`);
-            } else if (currentGData.currentExtraModePhase === 'actionExecution') {
-                const currentActionIndex = newRoundActionOrder.indexOf(currentGData.currentActionPlayerId);
-                if (currentActionIndex < newRoundActionOrder.length - 1) { nextActionPlayerId = newRoundActionOrder[currentActionIndex + 1]; nextPhase = 'actionExecution'; }
-                else { nextPhase = 'resultPublication'; nextPhaseTimer = Timestamp.fromMillis(Date.now() + RESULT_PUBLICATION_DURATION * 1000); sendSystemChatMessage("全アクション実行完了。結果発表フェーズへ。"); }
-            } else if (currentGData.currentExtraModePhase === 'resultPublication') {
-                nextPhase = 'chat'; nextPhaseTimer = Timestamp.fromMillis(Date.now() + CHAT_PHASE_DURATION * 1000); sendSystemChatMessage("結果発表終了。チャットフェーズへ。");
-            } else if (currentGData.currentExtraModePhase === 'chat') {
-                nextPhase = 'declaration'; updates.roundNumber = increment(1); updates.declarations = {}; 
-                const currentRound = (currentGData.roundNumber || 0) + 1;
-                updates.traps = (currentGData.traps || []).filter(trap => trap.expiryRound >= currentRound);
-                currentGData.players.forEach(pid => { 
-                    updates[`playerStates.${pid}.hasDeclaredThisTurn`] = false; 
-                    updates.declarations[pid] = { type: null, submittedAt: null }; 
-                    const activeEffects = (currentGData.playerStates[pid]?.sabotageEffects || []).filter(eff => eff.expiryRound >= currentRound);
-                    updates[`playerStates.${pid}.sabotageEffects`] = activeEffects;
-                });
-                const activeAlliances = (currentGData.alliances || []).filter(ally => ally.durationTurns === Infinity || (ally.startRound + ally.durationTurns) > currentRound);
-                updates.alliances = activeAlliances;
-                currentGData.players.forEach(pid => {
-                    const pState = currentGData.playerStates[pid];
-                    if (pState.allianceId && !activeAlliances.find(a => a.id === pState.allianceId && a.members.includes(pid))) {
-                        updates[`playerStates.${pid}.allianceId`] = null;
-                        sendSystemChatMessage(`${pid.substring(0,5)}の同盟が期限切れで解消されました。`);
-                    }
-                });
-                if (currentRound % SPECIAL_EVENT_INTERVAL_ROUNDS === 0) {
-                    const event = SPECIAL_EVENTS[Math.floor(Math.random() * SPECIAL_EVENTS.length)];
-                    updates.specialEventActive = { type: event.id, name: event.name, description: event.description, visibleUntilRound: currentRound }; 
-                    sendSystemChatMessage(`特殊イベント発生: 「${event.name}」！ ${event.description}`);
-                    if (event.id === 'maze_shift') {
-                        const newMazesShifted = {...currentGData.mazes};
-                        currentGData.players.forEach(pIdShift => {
-                            const pStateShift = currentGData.playerStates[pIdShift];
-                            const mazeOwnerShift = pStateShift.assignedMazeOwnerId;
-                            if (newMazesShifted[mazeOwnerShift]) {
-                                let currentWallsShift = newMazesShifted[mazeOwnerShift].allWallsConfiguration.map(w => ({...w}));
-                                let wallChangeCount = 0;
-                                for(let i=0; i < Math.min(5, currentWallsShift.length / 4) && wallChangeCount < 3; i++) { 
-                                    const randWallIdx = Math.floor(Math.random() * currentWallsShift.length);
-                                    const tempWallsShift = currentWallsShift.map((w,idx) => idx === randWallIdx ? {...w, active: !w.active} : w);
-                                    if(isPathPossible(newMazesShifted[mazeOwnerShift].start, newMazesShifted[mazeOwnerShift].goal, tempWallsShift, newMazesShifted[mazeOwnerShift].gridSize)) {
-                                        currentWallsShift = tempWallsShift;
-                                        wallChangeCount++;
-                                    }
-                                }
-                                newMazesShifted[mazeOwnerShift].allWallsConfiguration = currentWallsShift;
-                                newMazesShifted[mazeOwnerShift].walls = currentWallsShift.filter(w => w.active);
-                            }
-                        });
-                        updates.mazes = newMazesShifted;
-                    }
-                } else { updates.specialEventActive = null; }
-                nextPhaseTimer = Timestamp.fromMillis(Date.now() + DECLARATION_PHASE_DURATION * 1000); sendSystemChatMessage(`ラウンド ${currentRound} 開始。行動宣言フェーズへ。`);
+                    
+                    // 次のラウンド準備
+                    updates = {
+                        currentExtraModePhase: 'declaration',
+                        currentActionPlayerId: null,
+                        roundNumber: newRoundNumber,
+                        phaseTimerEnd: Timestamp.fromMillis(Date.now() + DECLARATION_PHASE_DURATION)
+                    };
+                    
+                    // プレイヤー状態をリセット
+                    currentGData.players.forEach(pid => {
+                        updates[`playerStates.${pid}.hasDeclaredThisTurn`] = false;
+                        updates[`playerStates.${pid}.actionExecutedThisTurn`] = false;
+                        updates[`playerStates.${pid}.declaredAction`] = null;
+                    });
+                    
+                    sendSystemChatMessage(`ラウンド ${newRoundNumber} 開始！宣言フェーズが始まります。`);
+                }
+                break;
+                
+            default:
+                console.log("Unknown phase:", currentGData.currentExtraModePhase);
+                return;
+        }
+        
+        if (Object.keys(updates).length > 0) {
+            try {
+                await updateDoc(gameDocRef, updates);
+            } catch (error) {
+                console.error("Error advancing extra mode phase:", error);
             }
-            updates.currentExtraModePhase = nextPhase;
-            if (nextPhaseTimer) updates.phaseTimerEnd = nextPhaseTimer; else updates.phaseTimerEnd = null;
-            if (nextActionPlayerId) updates.currentActionPlayerId = nextActionPlayerId; else if (nextPhase !== 'actionExecution') updates.currentActionPlayerId = null;
-            if (Object.keys(updates).length > 0) await updateDoc(gameDocRef, updates);
-        } catch (error) { console.error("Error advancing extra mode phase:", error); sendSystemChatMessage("フェーズ進行エラー: " + error.message); }
-    }, [appId, sendSystemChatMessage]);
-
-
-    useEffect(() => { /* Phase Timer & Auto-advance ... (same as previous) ... */ 
-        if (gameType === 'extra' && gameData?.phaseTimerEnd && gameData?.status === 'playing') {
-            const now = Date.now(); const endTime = gameData.phaseTimerEnd.toMillis(); let timeLeft = Math.max(0, Math.floor((endTime - now) / 1000)); setPhaseTimeLeft(timeLeft);
-            const timerId = setInterval(() => { timeLeft = Math.max(0, Math.floor((gameData.phaseTimerEnd.toMillis() - Date.now()) / 1000)); setPhaseTimeLeft(timeLeft);
-                if (timeLeft <= 0) { clearInterval(timerId); if (userId === gameData.players[0] || userId === gameData.hostId) { console.log(`${gameData.currentExtraModePhase} phase time up. Advancing...`); advanceExtraModePhase(gameId, gameData); } }
-            }, 1000); return () => clearInterval(timerId);
-        } else { setPhaseTimeLeft(null); }
-    }, [gameData, gameType, gameId, userId, advanceExtraModePhase]);
-
-    // Overall Game Timer for Extra Mode
-    useEffect(() => {
-        if (gameType === 'extra' && gameData?.gameTimerEnd && gameData?.status === 'playing') {
-            const now = Date.now();
-            const endTime = gameData.gameTimerEnd.toMillis();
-            let timeLeft = Math.max(0, Math.floor((endTime - now) / 1000));
-            setOverallTimeLeft(timeLeft);
-
-            const timerId = setInterval(() => {
-                timeLeft = Math.max(0, Math.floor((gameData.gameTimerEnd.toMillis() - Date.now()) / 1000));
-                setOverallTimeLeft(timeLeft);
-                if (timeLeft <= 0 && gameData.status === 'playing') { // Check status again
-                    clearInterval(timerId);
-                    if (userId === gameData.players[0] || userId === gameData.hostId) { // Host triggers game end
-                        sendSystemChatMessage("全体制限時間に達しました！ゲーム終了処理を開始します。");
-                        finalizeGameExtraMode(gameId, gameData);
-                    }
-                }
-            }, 1000);
-            return () => clearInterval(timerId);
-        } else {
-            setOverallTimeLeft(null);
         }
-    }, [gameData, gameType, gameId, userId, finalizeGameExtraMode, sendSystemChatMessage]);
+    }, [finalizeGameExtraMode, sendSystemChatMessage]);
 
-    // Personal Thinking Timer for Extra Mode
-    useEffect(() => {
-        if (gameType === 'extra' && gameData?.status === 'playing' && myPlayerState &&
-            (gameData.currentExtraModePhase === 'declaration' && !myPlayerState.hasDeclaredThisTurn) ||
-            (gameData.currentExtraModePhase === 'actionExecution' && gameData.currentActionPlayerId === userId && !myPlayerState.actionExecutedThisTurn)
-        ) {
-            personalTimerIntervalRef.current = setInterval(async () => {
-                const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
-                try {
-                    await updateDoc(gameDocRef, { [`playerStates.${userId}.personalTimeUsed`]: increment(1) });
-                } catch (error) { console.error("Error updating personal time:", error); }
-            }, 1000);
-        } else {
-            clearInterval(personalTimerIntervalRef.current);
-        }
-        return () => clearInterval(personalTimerIntervalRef.current);
-    }, [gameData, myPlayerState, userId, gameId, gameType, appId]);
-
-
-    // Effect to update shared information from allies
-    useEffect(() => { /* ... (same as previous) ... */ 
-        if (gameType === 'extra' && gameData && myPlayerState && myPlayerState.allianceId) {
-            const currentAlliance = gameData.alliances?.find(a => a.id === myPlayerState.allianceId); const allianceTypeDetails = NEGOTIATION_TYPES.find(nt => nt.id === currentAlliance?.type);
-            if (currentAlliance && allianceTypeDetails && (allianceTypeDetails.sharesWalls || allianceTypeDetails.sharesScout)) {
-                let newSharedWalls = []; let newSharedScouts = [];
-                currentAlliance.members.forEach(memberId => { if (memberId !== userId && gameData.playerStates[memberId]) { const memberState = gameData.playerStates[memberId]; if (allianceTypeDetails.sharesWalls) newSharedWalls = newSharedWalls.concat(memberState.revealedWalls || []); if (allianceTypeDetails.sharesScout) newSharedScouts = newSharedScouts.concat(memberState.privateLog?.filter(log => log.text.includes("偵察")) || []); } });
-                const uniqueWallStrings = new Set(newSharedWalls.map(w => `${w.r}-${w.c}-${w.type}`)); setSharedWalls(Array.from(uniqueWallStrings).map(s => { const p = s.split('-'); return {r: parseInt(p[0]), c: parseInt(p[1]), type: p[2], active:true}; }));
-                setSharedScoutLogs(newSharedScouts.sort((a,b) => b.timestamp.toMillis() - a.timestamp.toMillis()).slice(0,5)); 
-            } else { setSharedWalls([]); setSharedScoutLogs([]); }
-        } else { setSharedWalls([]); setSharedScoutLogs([]); }
-    }, [gameData, myPlayerState, gameType, userId]);
-
-
-    useEffect(() => { /* Game Data and Chat Listener (main part) */ 
-        if (!gameId || !userId) return;
+    // 不足している関数の実装
+    const executeMyDeclaredAction = useCallback(async () => {
+        if (!gameData || !myPlayerState?.declaredAction || myPlayerState.actionExecutedThisTurn) return;
+        
+        const action = myPlayerState.declaredAction;
         const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
-        const unsubscribeGame = onSnapshot(gameDocRef, (docSnap) => {
-            if (docSnap.exists()) {
-                const data = docSnap.data(); setGameData(data); setGameType(data.gameType || 'standard'); const currentPlayerState = data.playerStates?.[userId]; setMyPlayerState(currentPlayerState);
-                if (currentPlayerState && data.mazes && data.mazes[currentPlayerState.assignedMazeOwnerId]) setMazeToPlayData(data.mazes[currentPlayerState.assignedMazeOwnerId]);
-                if (data.mazes && data.mazes[userId]) { setMyCreatedMazeData(data.mazes[userId]); const solver = Object.entries(data.playerStates || {}).find(([pid, ps]) => ps.assignedMazeOwnerId === userId); if(solver) setPlayerSolvingMyMaze({id: solver[0], ...solver[1]}); else setPlayerSolvingMyMaze(null); }
-                if (data.gameType === 'standard' && data.activeBattle && (data.activeBattle.player1Id === userId || data.activeBattle.player2Id === userId) && currentPlayerState && currentPlayerState.battleBet === null && data.activeBattle.status === 'betting') { setIsBattleModalOpen(true); setBattleOpponentId(data.activeBattle.player1Id === userId ? data.activeBattle.player2Id : data.activeBattle.player1Id); } else { setIsBattleModalOpen(false); }
-                if (data.status === "finished") { 
-                    if(!isGameOverModalOpen) setIsGameOverModalOpen(true); // Open modal if not already
-                    let endMessage = "ゲーム終了！ "; const sortedPlayers = (data.players || []).map(pid => ({ id: pid, ...data.playerStates[pid] })).sort((a, b) => (a.rank || Infinity) - (b.rank || Infinity) || (b.score || 0) - (a.score || 0) ); endMessage += sortedPlayers.map((p, idx) => `${p.rank || idx + 1}位: ${p.id.substring(0,8)} (${p.score || 0}pt)`).join('; '); setMessage(endMessage); return; 
-                }
-                if (data.status !== "playing") return;
-                let currentPhaseMessage = "";
-                if (data.gameType === 'extra') { /* ... phase message logic ... */ 
-                    currentPhaseMessage = `エクストラ ラウンド ${data.roundNumber || 1} - `;
-                    switch(data.currentExtraModePhase) {
-                        case "declaration": currentPhaseMessage += "行動宣言フェーズ"; if (currentPlayerState && !currentPlayerState.hasDeclaredThisTurn) currentPhaseMessage += " あなたの行動を宣言してください。"; else currentPhaseMessage += " 他のプレイヤーの宣言待ち..."; break;
-                        case "priorityResolution": currentPhaseMessage += "優先度決定中..."; break;
-                        case "actionExecution": currentPhaseMessage += `行動実行中 (${data.currentActionPlayerId ? data.currentActionPlayerId.substring(0,5) : '-'})`; break;
-                        case "resultPublication": currentPhaseMessage += "結果発表中..."; break;
-                        case "chat": currentPhaseMessage += "チャットフェーズ"; break;
-                        default: currentPhaseMessage += "準備中";
-                    }
-                } else { /* Standard mode message logic */  if (data.currentTurnPlayerId === userId) { if(currentPlayerState?.isTurnSkipped) currentPhaseMessage="あなたは1ターン休みです。"; else if (data.activeBattle) currentPhaseMessage=`${battleOpponentId ? battleOpponentId.substring(0,8) : '相手'}とバトル中！ポイント入力待機。`; else currentPhaseMessage="あなたのターンです。移動してください。"; } else { currentPhaseMessage=`相手 (${data.currentTurnPlayerId ? data.currentTurnPlayerId.substring(0,8) : '?'}) のターンです...`; } }
-                setMessage(currentPhaseMessage);
-                if (data.gameType === 'extra' && data.currentExtraModePhase === 'actionExecution' && data.currentActionPlayerId === userId && myPlayerState?.declaredAction && !myPlayerState.actionExecutedThisTurn) { // Added actionExecutedThisTurn check
-                    executeMyDeclaredAction();
-                }
-            } else { setMessage("ゲームデータが見つかりません。"); setScreen('lobby'); }
-        });
-        const chatCollRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/chatMessages`);
-        const qChat = query(chatCollRef, orderBy("timestamp", "desc"), limit(50)); 
-        const unsubscribeChat = onSnapshot(qChat, (querySnapshot) => { const messages = []; querySnapshot.forEach((doc) => messages.push({ id: doc.id, ...doc.data() })); setChatMessages(messages.reverse()); });
-        // Action Log Listener
-        if (gameType === 'extra' && gameId) {
-            const actionLogRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/actionLog`); // Assuming subcollection
-            const qActionLog = query(actionLogRef, orderBy("timestamp", "desc"), limit(10));
-            const unsubscribeActionLog = onSnapshot(qActionLog, (snapshot) => {
-                const logs = [];
-                snapshot.forEach(doc => logs.push({id: doc.id, ...doc.data()}));
-                setActionLog(logs.reverse());
-            });
-            return () => { unsubscribeGame(); unsubscribeChat(); unsubscribeActionLog(); };
-        }
-
-        return () => { unsubscribeGame(); unsubscribeChat(); };
-    }, [gameId, userId, setScreen, advanceExtraModePhase, executeMyDeclaredAction, isGameOverModalOpen, gameType]); // Added gameType
-
-    const handleDeclareAction = async () => { /* ... (same as previous, calls advanceExtraModePhase) ... */ 
-        if (!gameData || gameType !== 'extra' || gameData.currentExtraModePhase !== 'declaration' || !myPlayerState || myPlayerState.hasDeclaredThisTurn || !selectedAction) { setMessage("宣言できません。"); return; }
-        const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
-        const declarationData = { type: selectedAction, targetId: actionTarget, details: {}, submittedAt: serverTimestamp() };
-        if (selectedAction === 'sabotage') { if (!sabotageType) { setMessage("妨害タイプを選択してください。"); return; } declarationData.details.sabotageType = sabotageType; if (sabotageType === 'trap') { if (!trapPlacementCoord) { setMessage("トラップの設置座標を選択してください。"); return; } declarationData.details.trapCoordinates = trapPlacementCoord; } }
-        if (selectedAction === 'negotiate') { if (!negotiationDetails.type) { setMessage("交渉タイプを選択してください。"); return; } declarationData.details.negotiation = negotiationDetails; }
+        
         try {
-            await updateDoc(gameDocRef, { [`declarations.${userId}`]: declarationData, [`playerStates.${userId}.hasDeclaredThisTurn`]: true, [`playerStates.${userId}.actionExecutedThisTurn`]: false }); // Reset actionExecutedThisTurn
-            setMessage(`${selectedAction} を宣言しました。他のプレイヤーを待っています...`);
-            setSelectedAction(null); setActionTarget(null); setShowActionDetails(false); setSabotageType(null); setNegotiationDetails({type: null, duration: null, conditions: ""}); setIsPlacingTrap(false); setTrapPlacementCoord(null);
-            const updatedGameSnap = await getDoc(gameDocRef);
-            if (updatedGameSnap.exists()) { const updatedGData = updatedGameSnap.data(); const allDeclared = updatedGData.players.every(pid => updatedGData.declarations[pid]?.type); if (allDeclared) advanceExtraModePhase(gameId, updatedGData); }
-        } catch (error) { console.error("Error declaring action:", error); setMessage("宣言エラー: " + error.message); }
-    };
-    
-    const executeMyDeclaredAction = useCallback(async () => { /* ... (same as previous, with sabotage/negotiation placeholders) ... */ 
-        if (!gameData || !myPlayerState || !myPlayerState.declaredAction || myPlayerState.declaredAction.type === null || myPlayerState.actionExecutedThisTurn) return; 
-        const action = myPlayerState.declaredAction; let actionResultSummary = `${userId.substring(0,5)} が ${action.type} を実行。`; const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId); let updates = {};
-        updates[`playerStates.${userId}.actionExecutedThisTurn`] = true; 
-        sendSystemChatMessage(`${userId.substring(0,5)} のアクション: ${action.type} ${action.targetId ? `(対象: ${action.targetId.substring(0,5)})` : ''} ${action.details?.sabotageType ? `(タイプ: ${action.details.sabotageType})` : ''}`);
-        switch(action.type) {
-            case 'move': /* ... (move logic from previous, including trap check) ... */ 
-                const { r: currentR, c: currentC } = myPlayerState.position; let newR = currentR, newC = currentC;
-                // For Extra Mode, move needs a target cell selected during declaration, stored in action.details.targetCell
-                if (action.details?.targetCell) { newR = action.details.targetCell.r; newC = action.details.targetCell.c;} 
-                else { actionResultSummary += ` 移動先未指定のため待機扱い。`; updates[`playerStates.${userId}.declaredAction`] = {type: 'wait'}; /* effectively a wait */ break; } // If no target, treat as wait
-
-                const confusionEffect = myPlayerState.sabotageEffects?.find(eff => eff.type === 'confusion' && eff.expiryRound >= gameData.roundNumber);
-                if (confusionEffect) { actionResultSummary += `混乱状態で移動方向がランダムに！ `; const directions = [[0,1], [0,-1], [1,0], [-1,0]]; const randDir = directions[Math.floor(Math.random() * directions.length)]; newR = currentR + randDir[0]; newC = currentC + randDir[1]; updates[`playerStates.${userId}.sabotageEffects`] = arrayRemove(confusionEffect); }
-                if (newR < 0 || newR >= currentGridSize || newC < 0 || newC >= currentGridSize) { actionResultSummary += `盤外へ移動しようとして失敗。`; }
-                else { const landingOnTrap = gameData.traps?.find(t => t.r === newR && t.c === newC && t.ownerId !== userId && t.expiryRound >= gameData.roundNumber && t.mazeOwnerId === myPlayerState.assignedMazeOwnerId);
-                    if (landingOnTrap) { actionResultSummary += ` (${newR},${newC})へ移動しようとしたが、${landingOnTrap.ownerId.substring(0,5)}のトラップに嵌った！1ターン休み。`; updates[`playerStates.${userId}.isTurnSkipped`] = true; sendSystemChatMessage(`${userId.substring(0,5)}が${landingOnTrap.ownerId.substring(0,5)}のトラップに嵌った！`); updates[`playerStates.${landingOnTrap.ownerId}.score`] = increment(5); }
-                    else { updates[`playerStates.${userId}.position`] = {r: newR, c: newC}; actionResultSummary += ` (${newR},${newC})へ移動。`; if (!myPlayerState.revealedCells[`${newR}-${newC}`]) { updates[`playerStates.${userId}.score`] = increment(1); updates[`playerStates.${userId}.revealedCells.${newR}-${newC}`] = true; actionResultSummary += ` +1pt。`; } } }
-                // Goal Check for COMP_FIRST_GOAL
-                if (mazeToPlayData && newR === mazeToPlayData.goal.r && newC === mazeToPlayData.goal.c && !myPlayerState.goalTime) {
-                    updates[`playerStates.${userId}.goalTime`] = serverTimestamp(); // Mark goal time
-                    updates.goalCount = increment(1);
-                    updates.playerGoalOrder = arrayUnion({playerId: userId, time: serverTimestamp()}); // Use serverTimestamp for order
-                    actionResultSummary += ` ゴール！`;
-
-                    if (myPlayerState.secretObjective?.id === "COMP_FIRST_GOAL" && !myPlayerState.secretObjective.achieved && !myPlayerState.allianceId && gameData.goalCount === 0) { // goalCount is before this player's goal
-                        updates[`playerStates.${userId}.secretObjective.achieved`] = true;
-                        updates[`playerStates.${userId}.score`] = increment(myPlayerState.secretObjective.points);
-                        actionResultSummary += ` [秘密目標達成: ${myPlayerState.secretObjective.text}]`;
-                        sendSystemChatMessage(`${userId.substring(0,5)}が秘密目標「${myPlayerState.secretObjective.text}」を達成！ (+${myPlayerState.secretObjective.points}pt)`);
-                    }
-                     // Check if game should end (e.g., all players goaled or time up)
-                    if ( (gameData.goalCount + 1) >= gameData.players.length && gameData.status !== 'finished') {
-                        finalizeGameExtraMode(gameId, {...gameData, playerStates: {...gameData.playerStates, [userId]: {...myPlayerState, goalTime: Timestamp.now() /* temp for finalize */}}, goalCount: gameData.goalCount + 1}); // Pass potentially updated data
-                    }
-                }
-                break;
-            case 'scout': /* ... (same as previous) ... */ 
-                if (action.targetId && gameData.playerStates[action.targetId]) { const targetPos = gameData.playerStates[action.targetId].position; actionResultSummary += ` 対象 (${action.targetId.substring(0,5)}) の位置は (${targetPos.r}, ${targetPos.c})。`; updates[`playerStates.${userId}.privateLog`] = arrayUnion({round: gameData.roundNumber, text: actionResultSummary, timestamp: serverTimestamp()}); updates[`playerStates.${userId}.score`] = increment(3); if (Math.random() < 0.3) sendSystemChatMessage(`${action.targetId.substring(0,5)} は偵察されたようです！`); } else { actionResultSummary += ` 対象不明。`; }
-                break;
-            case 'sabotage': /* ... (same as previous, with score increment) ... */ 
-                const sabType = action.details?.sabotageType; const targetId = action.targetId; actionResultSummary += ` ${sabType || '不明な'}妨害を ${targetId ? targetId.substring(0,5) : '誰か'} に試行。`;
-                if (targetId && gameData.playerStates[targetId]) {
-                    const currentAlliance = gameData.alliances?.find(a => a.id === myPlayerState.allianceId);
-                    if (currentAlliance && currentAlliance.members.includes(targetId) && currentAlliance.type === 'non_aggression') { 
-                        actionResultSummary += ` しかし、相互不可侵条約により妨害できず！ペナルティ -15pt。`; 
-                        updates[`playerStates.${userId}.score`] = increment(ALLIANCE_VIOLATION_PENALTY);
-                    } else {
-                        let sabotageSuccess = false;
-                        if (sabType === 'trap' && action.details?.trapCoordinates) { const {r: trapR, c: trapC} = action.details.trapCoordinates; updates.traps = arrayUnion({r: trapR, c: trapC, ownerId: userId, mazeOwnerId: gameData.playerStates[targetId].assignedMazeOwnerId, expiryRound: gameData.roundNumber + 1}); actionResultSummary += ` (${trapR},${trapC})にトラップ設置！`; sabotageSuccess = true; }
-                        else if (sabType === 'confusion') { if (Math.random() < 0.7) { updates[`playerStates.${targetId}.sabotageEffects`] = arrayUnion({type: 'confusion', expiryRound: gameData.roundNumber + 1}); actionResultSummary += ` ${targetId.substring(0,5)}に混乱攻撃成功！`; sabotageSuccess = true; } else { updates[`playerStates.${userId}.sabotageEffects`] = arrayUnion({type: 'confusion', expiryRound: gameData.roundNumber + 1}); actionResultSummary += ` 混乱攻撃失敗！自身が混乱状態に。`; } }
-                        else if (sabType === 'info_jam') { updates[`playerStates.${targetId}.sabotageEffects`] = arrayUnion({type: 'info_jam', expiryRound: gameData.roundNumber + 1}); actionResultSummary += ` ${targetId.substring(0,5)}の情報妨害成功！`; sabotageSuccess = true; }
-                        if (sabotageSuccess) {
-                            updates[`playerStates.${userId}.score`] = increment(5);
-                            if (myPlayerState.secretObjective?.id === "SAB_OBSTRUCT_THRICE" && !myPlayerState.secretObjective.achieved) {
-                                const newProgress = (myPlayerState.secretObjective.progress || 0) + 1;
-                                updates[`playerStates.${userId}.secretObjective.progress`] = newProgress;
-                                if (newProgress >= myPlayerState.secretObjective.counterMax) {
-                                    updates[`playerStates.${userId}.secretObjective.achieved`] = true;
-                                    updates[`playerStates.${userId}.score`] = increment(myPlayerState.secretObjective.points);
-                                    actionResultSummary += ` [秘密目標達成: ${myPlayerState.secretObjective.text}]`;
-                                    sendSystemChatMessage(`${userId.substring(0,5)}が秘密目標「${myPlayerState.secretObjective.text}」を達成！ (+${myPlayerState.secretObjective.points}pt)`);
-                                }
-                            }
+            let updates = {
+                [`playerStates.${userId}.actionExecutedThisTurn`]: true
+            };
+            
+            switch (action.type) {
+                case 'move':
+                    if (action.details?.targetCell) {
+                        const { r, c } = action.details.targetCell;
+                        updates[`playerStates.${userId}.position`] = { r, c };
+                        updates[`playerStates.${userId}.lastMoveTime`] = serverTimestamp();
+                        
+                        // 新しいセルの発見ボーナス
+                        if (!myPlayerState.revealedCells[`${r}-${c}`]) {
+                            updates[`playerStates.${userId}.score`] = increment(2); // エクストラモードは2pt
+                            updates[`playerStates.${userId}.revealedCells.${r}-${c}`] = true;
                         }
+                        
+                        // ゴール判定
+                        if (mazeToPlayData && r === mazeToPlayData.goal.r && c === mazeToPlayData.goal.c && !myPlayerState.goalTime) {
+                            updates[`playerStates.${userId}.goalTime`] = serverTimestamp();
+                            updates.goalCount = increment(1);
+                        }
+                        
+                        setMessage(`(${r},${c})に移動しました！`);
                     }
-                } else { actionResultSummary += ` 対象不在かタイプ不明で失敗。`; }
-                break;
-            case 'negotiate': 
-                actionResultSummary += ` 交渉行動。`;
-                if (action.details?.negotiation?.type === 'betrayal') {
-                    if (myPlayerState.allianceId) {
-                        const oldAllianceId = myPlayerState.allianceId;
-                        const oldAlliance = gameData.alliances.find(a => a.id === oldAllianceId);
-                        if (oldAlliance) {
-                            // Mark alliance as betrayed instead of removing, or store betrayed status
-                            const updatedAlliances = gameData.alliances.map(a => a.id === oldAllianceId ? {...a, status: 'betrayed', betrayedBy: userId, betrayedRound: gameData.roundNumber } : a);
-                            updates.alliances = updatedAlliances; 
-                            
-                            oldAlliance.members.forEach(memberId => {
-                                if (memberId !== userId) { 
-                                    sendSystemChatMessage(`${memberId.substring(0,5)}！ ${userId.substring(0,5)}があなたとの同盟を裏切りました！`);
-                                    updates[`playerStates.${memberId}.privateLog`] = arrayUnion({round: gameData.roundNumber, text: `${userId.substring(0,5)}に裏切られました。同盟ID: ${oldAllianceId.substring(0,5)}`, timestamp: serverTimestamp()});
-                                }
-                                updates[`playerStates.${memberId}.allianceId`] = null; // All members lose alliance
-                            });
-                            actionResultSummary += ` ${oldAlliance.members.filter(m=>m!==userId).map(m=>m.substring(0,5)).join(',')}との同盟を裏切り宣言！`;
-                            // updates[`playerStates.${userId}.score`] = increment(5); // Betrayal success points are game-end
-                            updates[`playerStates.${userId}.temporaryPriorityBoost`] = (myPlayerState.temporaryPriorityBoost || 0) + 1; 
-                            updates[`playerStates.${userId}.betrayedAllies`] = arrayUnion(...oldAlliance.members.filter(m => m !== userId));
-                        } else { actionResultSummary += ` 存在しない同盟を裏切ろうとしました。`; }
-                    } else { actionResultSummary += ` 裏切る同盟がありません。`; }
-                } else if (action.targetId && action.details?.negotiation) { 
-                    const offerId = doc(collection(db, 'dummy')).id; 
-                    updates[`playerStates.${action.targetId}.negotiationOffers`] = arrayUnion({ fromPlayerId: userId, offerId: offerId, type: action.details.negotiation.type, duration: NEGOTIATION_TYPES.find(nt => nt.id === action.details.negotiation.type)?.duration, conditions: action.details.negotiation.conditions, status: 'pending', timestamp: serverTimestamp() }); 
-                    actionResultSummary += ` ${action.targetId.substring(0,5)}に「${NEGOTIATION_TYPES.find(nt => nt.id === action.details.negotiation.type)?.label}」を提案。`; 
-                } else { actionResultSummary += ` 交渉対象または詳細不明。`;}
-                break;
-            case 'wait': actionResultSummary += ` 待機しました。`; break;
-            default: actionResultSummary += ` 未知のアクションタイプ。`;
+                    break;
+                    
+                case 'scout':
+                    if (action.targetId && gameData.playerStates[action.targetId]) {
+                        const targetPos = gameData.playerStates[action.targetId].position;
+                        updates[`playerStates.${userId}.scoutLogs`] = arrayUnion({
+                            targetId: action.targetId,
+                            position: targetPos,
+                            round: gameData.roundNumber
+                        });
+                        setMessage(`${action.targetId.substring(0,8)}...の位置を偵察しました。`);
+                    }
+                    break;
+                    
+                case 'sabotage':
+                    if (action.details?.sabotageType && action.targetId) {
+                        const sabotageEffect = {
+                            type: action.details.sabotageType,
+                            sourceId: userId,
+                            expiryRound: (gameData.roundNumber || 1) + 2 // 2ラウンド継続
+                        };
+                        
+                        updates[`playerStates.${action.targetId}.sabotageEffects`] = arrayUnion(sabotageEffect);
+                        setMessage(`${action.targetId.substring(0,8)}...に妨害を実行しました。`);
+                    }
+                    break;
+                    
+                case 'negotiate':
+                    if (action.targetId && action.details?.negotiation) {
+                        // 交渉処理は相手の承認が必要なため、提案として記録
+                        const negotiationProposal = {
+                            fromId: userId,
+                            toId: action.targetId,
+                            type: action.details.negotiation.type,
+                            conditions: action.details.negotiation.conditions,
+                            round: gameData.roundNumber,
+                            status: 'pending'
+                        };
+                        
+                        updates[`negotiations.${userId}-${action.targetId}-${Date.now()}`] = negotiationProposal;
+                        setMessage(`${action.targetId.substring(0,8)}...に交渉を提案しました。`);
+                    }
+                    break;
+                    
+                case 'wait':
+                    setMessage("待機しました。");
+                    break;
+                    
+                default:
+                    setMessage("不明なアクションです。");
+                    break;
+            }
+            
+            await updateDoc(gameDocRef, updates);
+            
+            // アクション実行後、次のフェーズに進行
+            setTimeout(() => {
+                advanceExtraModePhase(gameId, gameData);
+            }, 1500);
+            
+        } catch (error) {
+            console.error("Error executing action:", error);
+            setMessage("アクション実行に失敗しました。");
         }
-        updates.actionLog = arrayUnion({round: gameData.roundNumber, playerId: userId, actionType: action.type, targetId: action.targetId, resultSummary, timestamp: serverTimestamp()});
-        try { await updateDoc(gameDocRef, updates); setTimeout(async () => { if (userId === gameData.currentActionPlayerId) { const latestGameData = (await getDoc(gameDocRef)).data(); await advanceExtraModePhase(gameId, latestGameData); } }, ACTION_EXECUTION_DELAY); }
-        catch (error) { console.error("Error executing action:", error); sendSystemChatMessage(`アクション実行エラー (${userId.substring(0,5)}): ${error.message}`); }
-    }, [gameData, myPlayerState, userId, gameId, sendSystemChatMessage, advanceExtraModePhase, currentGridSize, mazeToPlayData, finalizeGameExtraMode]); // Added finalizeGameExtraMode
+    }, [gameData, myPlayerState, userId, gameId, mazeToPlayData, advanceExtraModePhase]);
 
-    const handleNegotiationResponse = async (offerId, response) => { /* ... (same as previous) ... */ 
-        if (!gameData || !myPlayerState || !offerId) return; const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
+    // 不足している関数の実装
+    const handleStandardMoveImproved = async (direction) => {
+        if (!isMyStandardTurn || inStandardBattleBetting) return;
+        
+        const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
+        const { r: currentR, c: currentC } = myPlayerState.position;
+        
+        let newR = currentR;
+        let newC = currentC;
+        
+        switch(direction) {
+            case 'up': newR--; break;
+            case 'down': newR++; break;
+            case 'left': newC--; break;
+            case 'right': newC++; break;
+            default: return;
+        }
+        
+        const gridSize = mazeToPlayData?.gridSize || STANDARD_GRID_SIZE;
+        
+        // 境界チェック
+        if (newR < 0 || newR >= gridSize || newC < 0 || newC >= gridSize) {
+            setMessage("盤外への移動はできません。");
+            return;
+        }
+        
+        // 壁チェック - 実際の迷路の壁構造をチェック
+        const walls = mazeToPlayData?.walls || [];
+        const isBlocked = walls.some(wall => {
+            if (wall.type === 'horizontal') {
+                // 水平壁：上下移動をブロック
+                if (direction === 'up' && wall.r === currentR && wall.c === currentC) return true;
+                if (direction === 'down' && wall.r === newR && wall.c === newC) return true;
+            } else if (wall.type === 'vertical') {
+                // 垂直壁：左右移動をブロック
+                if (direction === 'left' && wall.r === currentR && wall.c === currentR) return true;
+                if (direction === 'right' && wall.r === currentR && wall.c === newC) return true;
+            }
+            return false;
+        });
+        
+        if (isBlocked) {
+            setMessage("壁に阻まれて移動できません。");
+            return;
+        }
+        
+        try {
+            const updates = {
+                [`playerStates.${userId}.position`]: { r: newR, c: newC },
+                [`playerStates.${userId}.lastMoveTime`]: serverTimestamp(),
+            };
+            
+            // 新しいセルの発見ボーナス
+            if (!myPlayerState.revealedCells[`${newR}-${newC}`]) {
+                updates[`playerStates.${userId}.score`] = increment(1);
+                updates[`playerStates.${userId}.revealedCells.${newR}-${newC}`] = true;
+                setMessage(`(${newR},${newC})に移動！ +1pt`);
+            } else {
+                setMessage(`(${newR},${newC})に移動しました。`);
+            }
+            
+            // ゴール判定
+            if (mazeToPlayData && newR === mazeToPlayData.goal.r && newC === mazeToPlayData.goal.c && !myPlayerState.goalTime) {
+                updates[`playerStates.${userId}.goalTime`] = serverTimestamp();
+                updates.goalCount = increment(1);
+                setMessage("ゴール達成！");
+            }
+            
+            await updateDoc(gameDocRef, updates);
+            
+            // スタンダードモード：移動後にターン進行
+            setTimeout(() => {
+                advanceStandardTurn();
+            }, 1500);
+            
+        } catch (error) {
+            console.error("Error moving:", error);
+            setMessage("移動に失敗しました。");
+        }
+    };
+
+    // スタンダードモード専用：ターン進行の実装
+    const advanceStandardTurn = useCallback(async () => {
+        if (gameType !== 'standard' || !gameData || !gameId) return;
+        
+        const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
+        
         try {
             await runTransaction(db, async (transaction) => {
-                const currentDoc = await transaction.get(gameDocRef); if (!currentDoc.exists()) throw "Game not found!"; const currentGData = currentDoc.data(); const currentPState = currentGData.playerStates[userId];
-                const offerIndex = currentPState.negotiationOffers.findIndex(o => o.offerId === offerId && o.status === 'pending'); if (offerIndex === -1) throw "Offer not found or already handled.";
-                const offer = currentPState.negotiationOffers[offerIndex]; const newOffers = [...currentPState.negotiationOffers]; newOffers[offerIndex] = { ...offer, status: response };
-                let transactionUpdates = { [`playerStates.${userId}.negotiationOffers`]: newOffers }; let systemMsgText = `${userId.substring(0,5)}が${offer.fromPlayerId.substring(0,5)}からの「${NEGOTIATION_TYPES.find(nt=>nt.id === offer.type)?.label}」提案を${response === 'accepted' ? '受諾' : '拒否'}しました。`;
-                if (response === 'accepted') {
-                    if (currentPState.allianceId || currentGData.playerStates[offer.fromPlayerId].allianceId) { systemMsgText += " しかし、どちらかが既に別の同盟に所属しているため、新しい同盟は結成できませんでした。"; }
-                    else {
-                        const allianceId = doc(collection(db, 'dummy')).id;
-                        const newAlliance = { id: allianceId, members: [offer.fromPlayerId, userId], type: offer.type, durationTurns: offer.duration, startRound: currentGData.roundNumber, trustLevel: 100, conditions: offer.conditions, createdAt: serverTimestamp() };
-                        transactionUpdates.alliances = arrayUnion(newAlliance);
-                        transactionUpdates[`playerStates.${userId}.allianceId`] = allianceId;
-                        transactionUpdates[`playerStates.${offer.fromPlayerId}.allianceId`] = allianceId;
-                        systemMsgText += " 新しい同盟が結成されました！";
-                        
-                        // Check COOP_LARGE_ALLIANCE for all members
-                        if (newAlliance.members.length >= 3) { // This condition won't be met for 2-player alliances
-                            newAlliance.members.forEach(memberId => {
-                                const memberState = currentGData.playerStates[memberId];
-                                if (memberState.secretObjective?.id === "COOP_LARGE_ALLIANCE" && !memberState.secretObjective.achieved) {
-                                    transactionUpdates[`playerStates.${memberId}.secretObjective.achieved`] = true;
-                                    transactionUpdates[`playerStates.${memberId}.score`] = increment(memberState.secretObjective.points);
-                                    // Use a separate call for system message if needed, or ensure it's safe within transaction context
-                                    // sendSystemChatMessage(`${memberId.substring(0,5)}が秘密目標「3人以上の同盟を成立させる」を達成！ (+${memberState.secretObjective.points}pt)`);
-                                    // For safety, system messages are often sent outside transactions or via cloud functions.
-                                    // Here, we'll just update the state. A global system message can be triggered by observing this change.
-                                    const chatCollRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/chatMessages`);
-                                    transaction.set(doc(chatCollRef), { senderId: "system", senderName: "システム", text: `${memberId.substring(0,5)}が秘密目標「3人以上の同盟を成立させる」を達成！ (+${memberState.secretObjective.points}pt)`, timestamp: serverTimestamp() });
-                                }
-                            });
-                        }
-                    }
+                const freshGameSnap = await transaction.get(gameDocRef);
+                if (!freshGameSnap.exists()) return;
+                
+                const freshData = freshGameSnap.data();
+                const currentPlayerIndex = freshData.players.indexOf(freshData.currentTurnPlayerId);
+                const nextPlayerIndex = (currentPlayerIndex + 1) % freshData.players.length;
+                const nextPlayerId = freshData.players[nextPlayerIndex];
+                
+                const updates = {
+                    currentTurnPlayerId: nextPlayerId,
+                    turnNumber: increment(1)
+                };
+                
+                // ゴール判定とゲーム終了チェック
+                const goaledPlayers = freshData.players.filter(pid => 
+                    freshData.playerStates[pid]?.goalTime
+                );
+                
+                // 2人プレイの場合、1人がゴールしたら終了
+                // 多人数の場合、過半数がゴールしたら終了
+                const playersToFinish = freshData.players.length === 2 ? 1 : Math.ceil(freshData.players.length / 2);
+                
+                if (goaledPlayers.length >= playersToFinish) {
+                    updates.status = 'finished';
+                    
+                    // ランキング計算
+                    const rankedPlayers = freshData.players.map(pid => ({
+                        id: pid,
+                        goalTime: freshData.playerStates[pid]?.goalTime?.toMillis() || Infinity,
+                        score: freshData.playerStates[pid]?.score || 0
+                    })).sort((a, b) => {
+                        if (a.goalTime !== b.goalTime) return a.goalTime - b.goalTime;
+                        return b.score - a.score;
+                    });
+                    
+                    rankedPlayers.forEach((player, index) => {
+                        updates[`playerStates.${player.id}.rank`] = index + 1;
+                    });
                 }
-                transaction.update(gameDocRef, transactionUpdates);
-                // Send system message outside transaction if it causes issues, or ensure it's safe.
-                // sendSystemChatMessage(systemMsgText); // Moved to be potentially outside or handled by observing state changes.
-                 const chatCollRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/chatMessages`);
-                 transaction.set(doc(chatCollRef), { senderId: "system", senderName: "システム", text: systemMsgText, timestamp: serverTimestamp() });
+                
+                transaction.update(gameDocRef, updates);
             });
-        } catch (error) { console.error("Error responding to negotiation:", error); sendSystemChatMessage("交渉応答エラー: " + error.message); }
-    };
-
-
-    // Standard mode placeholders (will not be called if gameType is 'extra')
-    const handleStandardMove = async (direction) => { console.log("Standard Move:", direction); };
-    const handleStandardBattleBet = async (betAmount) => { console.log("Standard Bet:", betAmount); };
-    const resolveStandardBattle = useCallback(async (gameIdToResolve, p1IdCurrent, p2IdCurrent) => { console.log("Resolve Standard Battle");}, []);
-    const handleSendChatMessage = async (systemMessage = null) => { /* ... (same as previous) ... */ 
-        const textToSend = systemMessage ? systemMessage.text : chatInput.trim();
-        const sender = systemMessage ? systemMessage.senderId : userId;
-        const senderName = systemMessage ? systemMessage.senderName : userId.substring(0,8);
-        if (textToSend === "" || !gameId ) return;
-        const chatCollRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/chatMessages`);
-        try { 
-            if (!systemMessage && myPlayerState?.sabotageEffects?.find(eff => eff.type === 'info_jam' && eff.expiryRound >= gameData?.roundNumber) && gameData?.specialEventActive?.type !== 'communication_jam') {
-                sendSystemChatMessage(`${userId.substring(0,5)}は情報妨害を受けておりチャットできません！`);
-                setChatInput(""); return;
-            }
-            if (!systemMessage && gameData?.specialEventActive?.type === 'communication_jam' && gameData.specialEventActive.visibleUntilRound >= gameData.roundNumber) {
-                sendSystemChatMessage(`特殊イベント「通信妨害」発動中！チャットは使用できません。`);
-                 setChatInput(""); return;
-            }
-            await addDoc(chatCollRef, { senderId: sender, senderName: senderName, text: textToSend, timestamp: serverTimestamp() }); 
-            if (!systemMessage) setChatInput(""); 
+            
+        } catch (error) {
+            console.error("Error advancing standard turn:", error);
         }
-        catch (error) { console.error("Error sending chat message:", error); }
+    }, [gameType, gameData, gameId]);
+
+    // アクション実行フェーズでの自動実行
+    useEffect(() => {
+        if (gameType === 'extra' && 
+            gameData?.currentExtraModePhase === 'actionExecution' && 
+            gameData?.currentActionPlayerId === userId && 
+            myPlayerState?.declaredAction && 
+            !myPlayerState?.actionExecutedThisTurn) {
+            
+            const executeWithDelay = setTimeout(() => {
+                executeMyDeclaredAction();
+            }, 1000); // 1秒待ってから実行
+            
+            return () => clearTimeout(executeWithDelay);
+        }
+    }, [gameData?.currentExtraModePhase, gameData?.currentActionPlayerId, myPlayerState?.actionExecutedThisTurn, executeMyDeclaredAction, gameType, userId]);
+
+    // handleSendChatMessage関数の実装
+    const handleSendChatMessage = async () => {
+        if (!chatInput.trim() || !gameId) return;
+        
+        // 通信妨害チェック
+        if (gameData?.specialEventActive?.type === 'communication_jam' ||
+            myPlayerState?.sabotageEffects?.some(eff => eff.type === 'info_jam' && eff.expiryRound >= gameData?.roundNumber)) {
+            setMessage("通信が妨害されています。");
+            return;
+        }
+        
+        const chatCollRef = collection(db, `artifacts/${appId}/public/data/labyrinthGames/${gameId}/chatMessages`);
+        
+        try {
+            await addDoc(chatCollRef, {
+                senderId: userId,
+                senderName: userId.substring(0, 8) + "...",
+                text: chatInput,
+                timestamp: serverTimestamp()
+            });
+            setChatInput("");
+        } catch (error) {
+            console.error("Error sending chat message:", error);
+            setMessage("メッセージ送信に失敗しました。");
+        }
     };
 
-    const formatPhaseTime = (seconds) => { /* ... (same as previous) ... */ if (seconds === null || seconds < 0) return "--:--"; const mins = Math.floor(seconds / 60); const secs = seconds % 60; return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`; };
-    
-    const ActionButton = ({ actionType, label, icon: IconComp, currentSelection, onSelect }) => ( /* ... (same as previous) ... */ 
-        <button onClick={() => { setSelectedAction(actionType); setActionTarget(null); setSabotageType(null); setNegotiationDetails({type:null, duration:null, conditions:""}); setShowActionDetails(true); setIsPlacingTrap(actionType === 'sabotage'); }}
-            className={`w-full p-2 text-white rounded flex items-center justify-center space-x-2 transition-all ${currentSelection === actionType ? 'ring-2 ring-offset-2 ring-yellow-400 shadow-lg' : 'hover:opacity-90'} ${actionType === 'move' ? 'bg-cyan-500' : ''} ${actionType === 'scout' ? 'bg-lime-500' : ''} ${actionType === 'sabotage' ? 'bg-amber-500' : ''} ${actionType === 'negotiate' ? 'bg-pink-500' : ''} ${actionType === 'wait' ? 'bg-gray-400' : ''} disabled:opacity-50 disabled:cursor-not-allowed`}
-            disabled={gameData?.currentExtraModePhase !== 'declaration' || myPlayerState?.hasDeclaredThisTurn} >
-            <IconComp size={18}/> <span>{label}</span>
-        </button>
-    );
-    
-    const handleTrapCoordinateSelect = (r, c) => {
-        setTrapPlacementCoord({r,c});
-        setIsPlacingTrap(false); 
-        setMessage(`トラップ設置座標: (${r},${c}) を選択しました。`);
+    // 不足している関数の実装 - declareSelectedAction を追加
+    const declareSelectedAction = useCallback(async () => {
+        if (!selectedAction || myPlayerState?.hasDeclaredThisTurn || gameData?.currentExtraModePhase !== 'declaration') return;
+        
+        const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, gameId);
+        let actionDetails = { type: selectedAction };
+        
+        // アクションごとの詳細設定
+        switch(selectedAction) {
+            case 'move':
+                if (!selectedMoveTarget) {
+                    setMessage("移動先を選択してください。");
+                    return;
+                }
+                actionDetails.details = { targetCell: selectedMoveTarget };
+                break;
+            case 'sabotage':
+                if (!sabotageType || !actionTarget) {
+                    setMessage("妨害タイプと対象を選択してください。");
+                    return;
+                }
+                actionDetails.targetId = actionTarget;
+                actionDetails.details = { sabotageType };
+                if (sabotageType === 'trap' && trapPlacementCoord) {
+                    actionDetails.details.trapCoordinates = trapPlacementCoord;
+                }
+                break;
+            case 'negotiate':
+                if (!actionTarget || !negotiationDetails.type) {
+                    setMessage("交渉対象とタイプを選択してください。");
+                    return;
+                }
+                actionDetails.targetId = actionTarget;
+                actionDetails.details = { negotiation: negotiationDetails };
+                break;
+            case 'scout':
+                if (!actionTarget) {
+                    setMessage("偵察対象を選択してください。");
+                    return;
+                }
+                actionDetails.targetId = actionTarget;
+                break;
+            case 'wait':
+                // 待機は追加の詳細不要
+                break;
+            default:
+                setMessage("無効なアクションです。");
+                return;
+        }
+        
+        try {
+            await updateDoc(gameDocRef, {
+                [`playerStates.${userId}.declaredAction`]: actionDetails,
+                [`playerStates.${userId}.hasDeclaredThisTurn`]: true,
+                [`declarations.${userId}`]: { ...actionDetails, submittedAt: serverTimestamp() }
+            });
+            
+            setMessage(`${selectedAction}を宣言しました！`);
+            setSelectedAction(null);
+            setActionTarget(null);
+            setSabotageType(null);
+            setSelectedMoveTarget(null);
+            setIsSelectingMoveTarget(false);
+            setTrapPlacementCoord(null);
+            setNegotiationDetails({ type: null, duration: null, conditions: "" });
+            setShowActionDetails(false);
+            
+        } catch (error) {
+            console.error("Error declaring action:", error);
+            setMessage("アクション宣言に失敗しました。");
+        }
+    }, [selectedAction, selectedMoveTarget, actionTarget, sabotageType, negotiationDetails, trapPlacementCoord, myPlayerState, gameData, userId, gameId]);
+
+    // 移動先選択の開始
+    const startMoveTargetSelection = () => {
+        if (selectedAction === 'move') {
+            setIsSelectingMoveTarget(true);
+            setMessage("移動先の隣接セルをクリックしてください。");
+        }
     };
 
+    // ActionButtonコンポーネントを追加
+    const ActionButton = ({ actionType, label, icon: Icon, currentSelection, onSelect }) => {
+        const isSelected = currentSelection === actionType;
+        return (
+            <button
+                onClick={() => {
+                    onSelect(actionType);
+                    setShowActionDetails(true);
+                }}
+                className={`p-2 rounded-lg border-2 text-sm transition-all duration-200 ${
+                    isSelected 
+                        ? 'border-blue-500 bg-blue-100 text-blue-800' 
+                        : 'border-gray-300 bg-white hover:border-blue-300 hover:bg-blue-50'
+                }`}
+            >
+                <div className="flex items-center justify-center space-x-1">
+                    <Icon size={16}/>
+                    <span>{label}</span>
+                </div>
+            </button>
+        );
+    };
 
-    const isMyStandardTurn = gameType === 'standard' && gameData?.currentTurnPlayerId === userId && !myPlayerState?.isTurnSkipped && gameData?.status === 'playing' && !gameData?.activeBattle;
-    const inStandardBattleBetting = gameType === 'standard' && gameData?.activeBattle && (gameData.activeBattle.player1Id === userId || gameData.activeBattle.player2Id === userId) && myPlayerState?.battleBet === null;
+    // エクストラモード用のアクション詳細コンポーネント
+    const renderActionDetails = () => {
+        if (!showActionDetails || !selectedAction) return null;
 
+        return (
+            <div className="mt-4 p-3 bg-gray-50 rounded-lg shadow-inner text-sm">
+                <h4 className="font-semibold mb-2">アクション詳細: {selectedAction}</h4>
+                
+                {selectedAction === 'move' && (
+                    <div className="space-y-2">
+                        <p>隣接するセルに移動します。</p>
+                        {!selectedMoveTarget ? (
+                            <button 
+                                onClick={startMoveTargetSelection}
+                                className="w-full bg-cyan-500 hover:bg-cyan-600 text-white p-2 rounded"
+                            >
+                                移動先を選択
+                            </button>
+                        ) : (
+                            <div className="space-y-2">
+                                <p className="text-green-600">移動先: ({selectedMoveTarget.r}, {selectedMoveTarget.c})</p>
+                                <div className="flex space-x-2">
+                                    <button 
+                                        onClick={() => {
+                                            setSelectedMoveTarget(null);
+                                            setIsSelectingMoveTarget(false);
+                                        }}
+                                        className="flex-1 bg-gray-500 hover:bg-gray-600 text-white p-1 rounded text-xs"
+                                    >
+                                        リセット
+                                    </button>
+                                    <button 
+                                        onClick={declareSelectedAction}
+                                        className="flex-1 bg-green-500 hover:bg-green-600 text-white p-1 rounded text-xs"
+                                    >
+                                        宣言
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+                
+                {selectedAction === 'wait' && (
+                    <div className="space-y-2">
+                        <p>何もしないことを宣言します。</p>
+                        <button 
+                            onClick={declareSelectedAction}
+                            className="w-full bg-green-500 hover:bg-green-600 text-white p-1 rounded text-xs"
+                        >
+                            待機を宣言
+                        </button>
+                    </div>
+                )}
+            </div>
+        );
+    };
 
-    if (!gameData || !myPlayerState ) { 
-        return <div className="flex items-center justify-center min-h-screen bg-slate-100"><p className="text-xl p-4 text-center">ゲームデータを読み込んでいます...<br/>リロードしても表示されない場合は、ロビーに戻って再試行してください。</p></div>;
-    }
+    // デバッグモード用のプレイヤー切り替えコンポーネント
+    const DebugPlayerSwitcher = () => {
+        if (!debugMode || !gameData?.players) return null;
+        
+        return (
+            <div className="bg-yellow-100 border-l-4 border-yellow-500 p-3 mb-4">
+                <div className="flex items-center space-x-2">
+                    <span className="text-yellow-800 font-semibold">🔧 DEBUG MODE:</span>
+                    <span className="text-yellow-700">プレイヤー切り替え:</span>
+                    <div className="flex space-x-1">
+                        {gameData.players.map((playerId, index) => (
+                            <button
+                                key={playerId}
+                                onClick={() => {
+                                    setDebugCurrentPlayerId(playerId);
+                                    console.log(`🔧 [DEBUG] Switched to player ${index + 1}: ${playerId.substring(0,8)}...`);
+                                }}
+                                className={`px-3 py-1 rounded text-sm font-medium ${
+                                    debugCurrentPlayerId === playerId
+                                        ? 'bg-blue-500 text-white'
+                                        : 'bg-white text-gray-700 hover:bg-gray-100'
+                                }`}
+                            >
+                                P{index + 1}
+                            </button>
+                        ))}
+                    </div>
+                    <span className="text-yellow-700 text-sm">
+                        現在: {debugCurrentPlayerId?.substring(0,8)}...
+                    </span>
+                </div>
+            </div>
+        );
+    };
 
     return (
-        <div className="flex flex-col items-center justify-start min-h-screen bg-slate-100 p-2 md:p-4 pt-4 md:pt-8">
-            <h1 className="text-2xl md:text-3xl font-bold mb-1 text-slate-800">プレイ中！ ({gameType === 'extra' ? 'エクストラモード' : gameMode})</h1>
-            <div className="flex space-x-4 text-xs md:text-sm text-slate-600 mb-1">
-                <span>ゲームID: {gameId?.substring(0,8)}...</span>
-                {gameType === 'extra' && overallTimeLeft !== null && <span><TimerIcon size={16} className="inline mr-1"/> 全体残り: {formatPhaseTime(overallTimeLeft)}</span>}
+        <div className="max-w-7xl mx-auto p-4 bg-gray-100 min-h-screen">
+            {/* デバッグモード時のプレイヤー切り替えUI */}
+            <DebugPlayerSwitcher />
+            
+            {/* ヘッダー部分を簡素化 */}
+            <div className="bg-white rounded-lg shadow-md p-4 mb-4">
+                <div className="flex justify-between items-center">
+                    <h1 className="text-2xl font-bold text-gray-800">
+                        {gameType === 'standard' ? 'スタンダードモード (二人対戦)' : 'エクストラモード'}
+                        {debugMode && <span className="text-yellow-600 ml-2 text-lg">🔧 DEBUG</span>}
+                    </h1>
+                    <button
+                        onClick={() => setScreen('lobby')}
+                        className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+                    >
+                        ロビーに戻る
+                    </button>
+                </div>
+                
+                {/* メッセージエリアのみ残す */}
+                {message && (
+                    <div className="mt-4 p-3 bg-yellow-50 rounded border-l-4 border-yellow-400">
+                        <p className="text-yellow-800 text-sm">{message}</p>
+                    </div>
+                )}
             </div>
-            {gameType === 'extra' && phaseTimeLeft !== null && <p className="text-md font-semibold text-blue-600 mb-1"> <Clock size={18} className="inline mr-1"/> フェーズ残り時間: {formatPhaseTime(phaseTimeLeft)} </p> }
-            {gameData?.specialEventActive && gameData.specialEventActive.visibleUntilRound >= gameData.roundNumber && (
-                <div className="my-2 p-2 bg-yellow-400 text-yellow-800 rounded-md shadow-lg text-sm font-semibold w-full max-w-xl text-center">
-                    <Megaphone size={16} className="inline mr-1" /> 特殊イベント: 「{gameData.specialEventActive.name}」発動中！ {gameData.specialEventActive.description}
-                </div>
-            )}
-            <p className={`text-sm md:text-md font-semibold mb-2 p-2 rounded w-full max-w-xl text-center ${isMyStandardTurn && !inStandardBattleBetting && gameType === 'standard' ? 'bg-green-100 text-green-700' : (inStandardBattleBetting && gameType === 'standard' ? 'bg-yellow-100 text-yellow-700' : (gameType === 'standard' ? 'bg-red-100 text-red-700' : 'bg-indigo-100 text-indigo-700'))}`}>{message}</p>
-            {gameType === 'standard' && <BattleModal isOpen={isBattleModalOpen} onClose={() => setIsBattleModalOpen(false)} onBet={handleStandardBattleBet} maxBet={myPlayerState?.score > 0 ? myPlayerState.score : 1} opponentName={battleOpponentId} myName={userId} myCurrentScore={myPlayerState?.score || 0} />}
-            <GameOverModal isOpen={isGameOverModalOpen} gameData={gameData} userId={userId} onClose={() => { setIsGameOverModalOpen(false); localStorage.removeItem('labyrinthGameId'); localStorage.removeItem('labyrinthGameType'); setScreen('lobby'); }} />
 
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 w-full max-w-7xl">
-                 <div className="lg:col-span-1 bg-white p-3 rounded-lg shadow-xl space-y-3 order-2 lg:order-1"> {/* Player Info Panel */}
-                    <h3 className="text-lg font-semibold border-b pb-1">プレイヤー情報</h3>
-                     {gameType === 'extra' && myPlayerState && <p className="text-xs text-gray-500"><TimerIcon size={12} className="inline mr-0.5"/> 個人思考時間: {formatPhaseTime(myPlayerState.personalTimeUsed)} / {formatPhaseTime(EXTRA_MODE_PERSONAL_TIME_LIMIT)}</p>}
-                    <ul className="text-xs space-y-1 max-h-48 overflow-y-auto">
-                        {(gameData.turnOrder || gameData.players).map(pid => { const pState = gameData.playerStates[pid]; if (!pState) return null;
-                            const currentAlliance = gameData.alliances?.find(a => a.id === pState.allianceId && a.status !== 'betrayed'); // Filter out betrayed alliances
-                            const allianceDetails = currentAlliance ? NEGOTIATION_TYPES.find(nt => nt.id === currentAlliance.type) : null;
-                            return ( <li key={pid} className={`p-1 rounded ${pid === userId ? 'bg-blue-100 font-bold' : ''} ${pid === gameData.currentTurnPlayerId && gameData.status === 'playing' && gameType === 'standard' ? 'ring-2 ring-green-500' : ''} ${pid === gameData.currentActionPlayerId && gameData.status === 'playing' && gameType === 'extra' && gameData.currentExtraModePhase === 'actionExecution' ? 'ring-2 ring-purple-500' : ''}`}> {pState.rank && <Award size={14} className="inline mr-1 text-yellow-500" title={`ランク: ${pState.rank}位`}/>} {pid.substring(0,8)}... : {pState.score || 0}pt {pState.goalTime && <CheckCircle size={14} className="inline ml-1 text-green-600" title={`ゴール済 (${pState.rank || '?'}位)`}/>} {pState.isTurnSkipped && <XCircle size={14} className="inline ml-1 text-orange-500" title="休み"/>} {pState.inBattleWith && gameType === 'standard' && <Swords size={14} className="inline ml-1 text-red-500" title={`バトル中: ${pState.inBattleWith.substring(0,5)}`}/>} {gameType === 'extra' && pState.hasDeclaredThisTurn && gameData.currentExtraModePhase === 'declaration' && <ListChecks size={14} className="inline ml-1 text-blue-500" title="宣言済"/>} {currentAlliance && allianceDetails && <Handshake size={12} className="inline ml-1 text-teal-600" title={`同盟: ${allianceDetails.label} (R${currentAlliance.startRound}~${currentAlliance.durationTurns === Infinity ? '永続' : 'あと'+ Math.max(0, (currentAlliance.startRound + currentAlliance.durationTurns - (gameData.roundNumber || 1))) + 'R'}) 信頼度: ${currentAlliance.trustLevel}`}/> } </li> )
-                        })}
-                    </ul>
-                    {myPlayerState?.secretObjective && gameType === 'extra' && ( <div className="mt-3 pt-2 border-t"> <h4 className="text-md font-semibold mb-1 text-purple-700"><Target size={16} className="inline mr-1"/> あなたの秘密目標:</h4> <p className="text-xs bg-purple-50 p-2 rounded">{myPlayerState.secretObjective.text} {myPlayerState.secretObjective.achieved ? <CheckCircle className="inline text-green-500 ml-1" title="達成済"/> : (myPlayerState.secretObjective.progress > 0 && myPlayerState.secretObjective.counterMax ? <span className="text-blue-500 ml-1">({myPlayerState.secretObjective.progress}/{myPlayerState.secretObjective.counterMax})</span> : "")}</p> </div> )}
-                    {myCreatedMazeData && ( <div className="mt-3 pt-2 border-t"> <h4 className="text-md font-semibold mb-1">あなたの作成した迷路 {playerSolvingMyMaze ? ` (挑戦者: ${playerSolvingMyMaze.id.substring(0,8)}...)` : ""} </h4> <div className="flex justify-center"> <MazeGrid mazeData={myCreatedMazeData} playerPosition={playerSolvingMyMaze?.position} smallView={true} showAllWalls={true} highlightPlayer={!!playerSolvingMyMaze} gridSize={myCreatedMazeData.gridSize || STANDARD_GRID_SIZE} traps={gameData?.traps?.filter(t => t.mazeOwnerId === userId)} alliedPlayersPos={gameData && myPlayerState?.allianceId ? gameData.players.filter(pid => pid !== userId && gameData.playerStates[pid]?.allianceId === myPlayerState.allianceId).map(pid => ({...gameData.playerStates[pid].position, id:pid})) : []} /> </div> </div> )}
-                     {gameType === 'extra' && myPlayerState?.privateLog && myPlayerState.privateLog.length > 0 && ( <div className="mt-3 pt-2 border-t"> <h4 className="text-md font-semibold mb-1 text-indigo-700"><Eye size={16} className="inline mr-1"/> 個人ログ:</h4> <ul className="text-xs bg-indigo-50 p-2 rounded max-h-24 overflow-y-auto"> {myPlayerState.privateLog.slice(-5).map((log, idx) => <li key={idx}>R{log.round}: {log.text}</li>)} </ul> </div> )}
-                     {gameType === 'extra' && sharedScoutLogs.length > 0 && ( <div className="mt-3 pt-2 border-t"> <h4 className="text-md font-semibold mb-1 text-teal-700"><Users2 size={16} className="inline mr-1"/> 同盟共有偵察ログ:</h4> <ul className="text-xs bg-teal-50 p-2 rounded max-h-24 overflow-y-auto"> {sharedScoutLogs.map((log, idx) => <li key={idx}>R{log.round} ({log.senderName}): {log.text}</li>)} </ul> </div> )}
-                     {gameType === 'extra' && myPlayerState?.negotiationOffers && myPlayerState.negotiationOffers.filter(o => o.status === 'pending').length > 0 && (
-                        <div className="mt-3 pt-2 border-t"> <h4 className="text-md font-semibold mb-1 text-pink-700"><Handshake size={16} className="inline mr-1"/> 交渉提案あり ({myPlayerState.negotiationOffers.filter(o => o.status === 'pending').length}件):</h4>
-                            {myPlayerState.negotiationOffers.filter(o => o.status === 'pending').map(offer => (
-                                <div key={offer.offerId} className="text-xs bg-pink-50 p-2 rounded mt-1">
-                                    <p><span className="font-semibold">{offer.fromPlayerId.substring(0,5)}</span>から「<span className="font-semibold">{NEGOTIATION_TYPES.find(nt=>nt.id === offer.type)?.label}</span>」の提案。</p>
-                                    {offer.conditions && <p className="text-2xs italic mt-0.5">条件: {offer.conditions}</p>}
-                                    <div className="mt-1">
-                                        <button onClick={() => handleNegotiationResponse(offer.offerId, 'accepted')} className="text-2xs bg-green-500 hover:bg-green-600 text-white px-1.5 py-0.5 rounded mr-1"><ThumbsUp size={12} className="inline"/> 受諾</button>
-                                        <button onClick={() => handleNegotiationResponse(offer.offerId, 'rejected')} className="text-2xs bg-red-500 hover:bg-red-600 text-white px-1.5 py-0.5 rounded"><ThumbsDown size={12} className="inline"/> 拒否</button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                     )}
-                </div>
-                <div className="lg:col-span-1 bg-white p-4 rounded-lg shadow-xl order-1 lg:order-2 flex flex-col items-center"> {/* Main Maze Panel */}
-                    <h2 className="text-xl font-semibold mb-2 text-center">あなたの挑戦 (迷路作成者: {myPlayerState?.assignedMazeOwnerId?.substring(0,8)}...)</h2>
-                    {mazeToPlayData ? ( <MazeGrid mazeData={mazeToPlayData} playerPosition={myPlayerState.position} showAllWalls={showOpponentWallsDebug || (gameData?.specialEventActive?.type === 'information_leak' && gameData.specialEventActive.visibleUntilRound >= gameData.roundNumber)} revealedPlayerWalls={myPlayerState.revealedWalls || []} revealedCells={myPlayerState.revealedCells} otherPlayers={Object.entries(gameData.playerStates || {}).filter(([pid]) => pid !== userId && gameData.playerStates[pid]?.assignedMazeOwnerId === myPlayerState.assignedMazeOwnerId).map(([id,ps])=> ({id, ...ps}))} gridSize={mazeToPlayData.gridSize || STANDARD_GRID_SIZE} traps={gameData?.traps?.filter(t => t.mazeOwnerId === myPlayerState.assignedMazeOwnerId)} selectingTrapCoord={isPlacingTrap && selectedAction === 'sabotage' && sabotageType === 'trap'} onTrapCoordSelect={handleTrapCoordinateSelect} alliedPlayersPos={gameData && myPlayerState?.allianceId ? gameData.players.filter(pid => pid !== userId && gameData.playerStates[pid]?.allianceId === myPlayerState.allianceId && gameData.playerStates[pid]?.assignedMazeOwnerId === myPlayerState.assignedMazeOwnerId).map(pid => ({...gameData.playerStates[pid].position, id:pid})) : []} sharedWallsFromAllies={sharedWalls} showAllPlayerPositions={gameData?.specialEventActive?.type === 'information_leak' && gameData.specialEventActive.visibleUntilRound >= gameData.roundNumber} /> ) : <p className="text-center text-gray-500">攻略する迷路を読み込み中...</p>}
-                    <div className="mt-3 text-center"> <button onClick={() => setShowOpponentWallsDebug(s => !s)} className="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300"> {showOpponentWallsDebug ? <EyeOff size={14} className="inline"/> : <Eye size={14} className="inline"/>} 全壁表示 (デバッグ) </button> </div>
-                </div>
-                <div className="lg:col-span-1 bg-white p-4 rounded-lg shadow-xl order-3 lg:order-3 space-y-3"> {/* Actions & Chat Panel */}
-                    {gameType === 'standard' && ( <div> {/* ... Standard mode actions ... */} </div> )}
-                    {gameType === 'extra' && ( <div> <h3 className="text-lg font-semibold mb-1">エクストラアクション {gameData?.currentExtraModePhase === 'declaration' && "(宣言フェーズ)"}</h3>
-                        {gameData?.currentExtraModePhase === 'declaration' && !myPlayerState?.hasDeclaredThisTurn && (
-                            <div className="space-y-1 mt-1">
-                                <ActionButton actionType="move" label="移動" iconComp={Move} currentSelection={selectedAction} onSelect={() => {setSelectedAction('move'); setShowActionDetails(true); setIsPlacingTrap(false);}} />
-                                <ActionButton actionType="scout" label="偵察" iconComp={Search} currentSelection={selectedAction} onSelect={() => {setSelectedAction('scout'); setShowActionDetails(true); setIsPlacingTrap(false);}} />
-                                <ActionButton actionType="sabotage" label="妨害" iconComp={Zap} currentSelection={selectedAction} onSelect={() => {setSelectedAction('sabotage'); setShowActionDetails(true); setIsPlacingTrap(sabotageType === 'trap');}} />
-                                <ActionButton actionType="negotiate" label="交渉" iconComp={Handshake} currentSelection={selectedAction} onSelect={() => {setSelectedAction('negotiate'); setShowActionDetails(true); setIsPlacingTrap(false);}} />
-                                <ActionButton actionType="wait" label="待機" iconComp={Hourglass} currentSelection={selectedAction} onSelect={() => {setSelectedAction('wait'); setShowActionDetails(false); setIsPlacingTrap(false);}} />
-                                
-                                {showActionDetails && selectedAction && (selectedAction === 'move' || selectedAction === 'scout' || selectedAction === 'sabotage' || selectedAction === 'negotiate') && (
-                                    <div className="my-1 p-2 border rounded bg-gray-50 text-xs">
-                                        { (selectedAction === 'scout' || (selectedAction === 'sabotage' && SABOTAGE_TYPES.find(s=>s.id===sabotageType)?.needsPlayerTarget) || (selectedAction === 'negotiate' && negotiationDetails.type !== 'betrayal')) &&
-                                            (<> <label className="block font-medium text-gray-700">対象プレイヤー:</label>
-                                            <select value={actionTarget || ""} onChange={(e) => setActionTarget(e.target.value)} className="mt-1 block w-full pl-2 pr-8 py-1 border-gray-300 rounded-md">
-                                                <option value="">-- 選択 --</option> {gameData.players.filter(p => p !== userId && !(myPlayerState?.allianceId && gameData.alliances?.find(a=>a.id === myPlayerState.allianceId)?.members.includes(p) && (selectedAction === 'sabotage' && NEGOTIATION_TYPES.find(nt=>nt.id===gameData.alliances.find(a=>a.id === myPlayerState.allianceId)?.type)?.id === 'non_aggression'))).map(pId => ( <option key={pId} value={pId}>{pId.substring(0,8)}...</option> ))}
-                                            </select> </>)
-                                        }
-                                        {selectedAction === 'move' && ( /* UI for move target selection, e.g., direction or cell */ <p className="text-gray-600">移動先を選択してください（UI未実装）</p> )}
-                                        {selectedAction === 'sabotage' && (
-                                            <div className="mt-1"> <label className="block font-medium text-gray-700">妨害タイプ:</label>
-                                                {SABOTAGE_TYPES.map(st => (<button key={st.id} onClick={()=>{setSabotageType(st.id); setIsPlacingTrap(st.id === 'trap'); if(st.id === 'trap')setMessage("トラップ設置座標をマップから選択してください。");}} className={`mr-1 mt-1 px-1.5 py-0.5 rounded ${sabotageType === st.id ? 'bg-red-500 text-white' : 'bg-red-200 text-red-700'}`}>{st.label}</button>))}
-                                                {sabotageType === 'trap' && <p className="text-blue-600 text-2xs mt-1">{trapPlacementCoord ? `選択座標: (${trapPlacementCoord.r}, ${trapPlacementCoord.c})` : "マップから設置座標を選択..."}</p>}
-                                            </div>
-                                        )}
-                                        {selectedAction === 'negotiate' && (
-                                            <div className="mt-1 space-y-1"> <label className="block font-medium text-gray-700">交渉タイプ:</label>
-                                                {NEGOTIATION_TYPES.map(nt => (<button key={nt.id} onClick={()=>setNegotiationDetails(prev => ({...prev, type: nt.id, duration: nt.duration}))} className={`mr-1 mt-1 px-1.5 py-0.5 rounded ${negotiationDetails.type === nt.id ? 'bg-pink-500 text-white' : 'bg-pink-200 text-pink-700'}`}>{nt.label}</button>))}
-                                                {negotiationDetails.type === 'betrayal' && <p className="text-orange-600 text-2xs mt-1">現在の同盟を破棄します。</p>}
-                                                {negotiationDetails.type && negotiationDetails.type !== 'betrayal' && (<> <label className="block font-medium text-gray-700 mt-1">追加条件 (任意):</label> <input type="text" value={negotiationDetails.conditions} onChange={e => setNegotiationDetails(prev => ({...prev, conditions: e.target.value}))} placeholder="例: 壁情報を3つ教える" className="w-full p-1 border rounded"/> </>)}
-                                            </div>
+            {/* メインコンテンツ：スタンダードモードとエクストラモードで分岐 */}
+            {gameType === 'standard' ? (
+                // スタンダードモード（二人対戦）レイアウト
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    {/* 左：自分が設定した迷宮 */}
+                    <div className="bg-white rounded-lg shadow-md p-4">
+                        <h2 className="text-lg font-semibold mb-4">
+                            あなたの設定した迷宮
+                        </h2>
+                        
+                        {myCreatedMazeData ? (
+                            <div>
+                                {/* スタンダードモード - 自分が設定した迷宮 */}
+                                <MazeGrid
+                                    mazeData={myCreatedMazeData}
+                                    playerPosition={playerSolvingMyMaze?.position}
+                                    otherPlayers={playerSolvingMyMaze ? [playerSolvingMyMaze] : []}
+                                    showAllWalls={true}
+                                    onCellClick={() => {}}
+                                    gridSize={currentGridSize}
+                                    sharedWalls={[]}
+                                    highlightPlayer={false}
+                                    smallView={false}
+                                />
+                                {playerSolvingMyMaze && (
+                                    <div className="mt-3 p-2 bg-gray-50 rounded text-sm">
+                                        <p className="font-semibold text-gray-700">攻略者の状態:</p>
+                                        <p>位置: ({playerSolvingMyMaze.position?.r || 0}, {playerSolvingMyMaze.position?.c || 0})</p>
+                                        <p>スコア: {playerSolvingMyMaze.score || 0}pt</p>
+                                        {playerSolvingMyMaze.goalTime && (
+                                            <p className="text-green-600 font-semibold">ゴール達成！</p>
                                         )}
                                     </div>
                                 )}
-                                <button onClick={handleDeclareAction} disabled={!selectedAction || ((selectedAction === 'scout' || (selectedAction === 'sabotage' && SABOTAGE_TYPES.find(s=>s.id===sabotageType)?.needsPlayerTarget) || (selectedAction === 'negotiate' && negotiationDetails.type !== 'betrayal')) && !actionTarget) || (selectedAction === 'sabotage' && !sabotageType) || (selectedAction === 'sabotage' && sabotageType === 'trap' && !trapPlacementCoord) || (selectedAction === 'negotiate' && !negotiationDetails.type) }
-                                    className="w-full mt-2 p-2 bg-green-500 text-white rounded hover:bg-green-600 disabled:opacity-50">宣言を確定</button>
+                            </div>
+                        ) : (
+                            <div className="flex items-center justify-center h-64 bg-gray-50 rounded">
+                                <div className="text-center">
+                                    <p className="text-gray-500 mb-2">迷宮データを読み込み中...</p>
+                                    <p className="text-xs text-gray-400">ゲームID: {gameId}</p>
+                                    <p className="text-xs text-gray-400">ユーザーID: {userId}</p>
+                                </div>
                             </div>
                         )}
-                        {gameData?.currentExtraModePhase === 'declaration' && myPlayerState?.hasDeclaredThisTurn && ( <p className="text-sm text-green-600 p-2 bg-green-50 rounded text-center">あなたは「{gameData.declarations[userId]?.type}」を宣言しました。他プレイヤー待ち。</p> )}
-                         {gameData?.currentExtraModePhase !== 'declaration' && ( <p className="text-sm text-gray-500 p-2 text-center">現在は「{gameData?.currentExtraModePhase}」フェーズです。 {gameData?.currentExtraModePhase === 'actionExecution' && `実行中: ${gameData.currentActionPlayerId ? gameData.currentActionPlayerId.substring(0,5) : '-'}`} </p> )}
-                    </div> )}
-                    <div className="border-t pt-2"> {/* Chat Area */} <h3 className="text-lg font-semibold mb-1">Open Chat</h3> <div ref={chatLogRef} className="h-32 overflow-y-auto border rounded p-2 bg-gray-50 text-xs mb-2"> {chatMessages.map(msg => ( <div key={msg.id} className={`mb-1 ${msg.senderId === userId ? 'text-right' : 'text-left'}`}> <span className={`px-2 py-1 rounded-lg inline-block ${msg.senderId === userId ? 'bg-blue-500 text-white' : (msg.senderId === 'system' ? 'bg-yellow-200 text-yellow-800 font-semibold' : 'bg-gray-200 text-gray-800')}`}> {msg.senderId !== 'system' && <strong className="font-semibold">{msg.senderName}: </strong>} {msg.text} </span> </div> ))} </div> <div className="flex space-x-2"> <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="メッセージを入力..." className="flex-grow border p-2 rounded-md text-sm" disabled={myPlayerState?.sabotageEffects?.find(eff => eff.type === 'info_jam' && eff.expiryRound >= gameData?.roundNumber) || (gameData?.specialEventActive?.type === 'communication_jam' && gameData.specialEventActive.visibleUntilRound >= gameData.roundNumber)} onKeyPress={(e) => e.key === 'Enter' && handleSendChatMessage()} /> <button onClick={() => handleSendChatMessage()} className="bg-green-500 hover:bg-green-600 text-white p-2 rounded-md" disabled={myPlayerState?.sabotageEffects?.find(eff => eff.type === 'info_jam' && eff.expiryRound >= gameData?.roundNumber) || (gameData?.specialEventActive?.type === 'communication_jam' && gameData.specialEventActive.visibleUntilRound >= gameData.roundNumber)}><Send size={20}/></button> </div> </div>
-                     {gameType === 'extra' && gameData?.actionLog && gameData.actionLog.length > 0 && (
-                        <div className="border-t pt-2 mt-2">
-                            <h3 className="text-lg font-semibold mb-1">公開アクションログ</h3>
-                            <ul className="text-xs bg-gray-50 p-2 rounded max-h-24 overflow-y-auto">
-                                {gameData.actionLog.slice(-5).map((log, idx) => (
-                                    <li key={idx} className="mb-0.5">
-                                        <span className="font-semibold">R{log.round}:</span> {log.resultSummary}
-                                    </li>
-                                ))}
-                            </ul>
+                    </div>
+
+                    {/* 中央：自分が攻略する迷宮 */}
+                    <div className="bg-white rounded-lg shadow-md p-4">
+                        <h2 className="text-lg font-semibold mb-4">
+                            攻略する迷宮
+                        </h2>
+                        
+                        {/* 現在のターン表示 */}
+                        <div className="mb-4 p-3 bg-blue-50 rounded-lg">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <h4 className="font-semibold text-blue-700">現在のターン</h4>
+                                    <p className="text-sm text-blue-600">
+                                        {gameData?.currentTurnPlayerId === effectiveUserId ? 
+                                            <span className="font-bold text-green-600">あなた</span> : 
+                                            <span className="font-bold text-orange-600">相手</span>
+                                        } (ターン数: {gameData?.turnNumber || 1})
+                                    </p>
+                                </div>
+                                <div className="text-right text-sm">
+                                    <p className="text-blue-700">
+                                        {debugMode ? `プレイヤー ${effectiveUserId.substring(0,8)}...` : 'あなた'}の状態
+                                    </p>
+                                    <p className="text-blue-600">
+                                        位置: ({effectivePlayerState?.position?.r || 0}, {effectivePlayerState?.position?.c || 0})
+                                        <br />
+                                        スコア: {effectivePlayerState?.score || 0}pt
+                                    </p>
+                                </div>
+                            </div>
                         </div>
-                    )}
+                        
+                        {/* 移動方法説明 */}
+                        {isMyStandardTurn && (
+                            <div className="mb-4 p-3 bg-green-50 rounded-lg">
+                                <h4 className="font-semibold text-green-700 mb-2">🎮 移動方法</h4>
+                                <div className="text-sm text-green-600 space-y-1">
+                                    <p><strong>方法1:</strong> 右下の移動宣言ボタンを使用</p>
+                                    <p><strong>方法2:</strong> 迷路上の隣接するセルを直接クリック</p>
+                                    <p><strong>方法3:</strong> キーボードの矢印キー または WASD</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 迷路グリッド */}
+                        {mazeToPlayData ? (
+                            <MazeGrid
+                                mazeData={mazeToPlayData}
+                                playerPosition={effectivePlayerState?.position}
+                                otherPlayers={gameData?.playerStates ? 
+                                    Object.entries(gameData.playerStates)
+                                        .filter(([pid]) => pid !== effectiveUserId)
+                                        .map(([pid, pState]) => ({ id: pid, position: pState.position })) 
+                                    : []
+                                }
+                                revealedCells={effectivePlayerState?.revealedCells || {}}
+                                revealedPlayerWalls={effectivePlayerState?.revealedWalls || []}
+                                onCellClick={handleCellClick}
+                                gridSize={currentGridSize}
+                                sharedWalls={sharedWalls}
+                                highlightPlayer={true}
+                                smallView={false}
+                            />
+                        ) : (
+                            <div className="flex items-center justify-center h-64 bg-gray-50 rounded">
+                                <div className="text-center">
+                                    <p className="text-gray-500 mb-2">攻略迷路を読み込み中...</p>
+                                    <p className="text-xs text-gray-400">割り当てられた迷路作成者: {myPlayerState?.assignedMazeOwnerId || "未割り当て"}</p>
+                                    {gameData?.mazes && (
+                                        <p className="text-xs text-gray-400 mt-2">
+                                            利用可能な迷路: {Object.keys(gameData.mazes).join(", ") || "なし"}
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 右：チャット＆移動宣言 */}
+                    <div className="space-y-4">
+                        {/* 上部：チャットエリア */}
+                        <div className="bg-white rounded-lg shadow-md p-4">
+                            <h4 className="text-lg font-semibold mb-3 flex items-center">
+                                <MessageSquare size={18} className="mr-2"/> チャット
+                            </h4>
+                            <div ref={chatLogRef} className="bg-gray-50 p-3 rounded-lg h-40 overflow-y-auto text-sm mb-3 border">
+                                {chatMessages.map(msg => (
+                                    <div key={msg.id} className={`mb-2 ${msg.senderId === 'system' ? 'text-blue-600 font-semibold' : ''}`}>
+                                        <span className="font-medium">{msg.senderName}:</span> {msg.text}
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="flex space-x-2">
+                                <input 
+                                    type="text" 
+                                    value={chatInput} 
+                                    onChange={(e) => setChatInput(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleSendChatMessage()}
+                                    className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="メッセージを入力..."
+                                />
+                                <button 
+                                    onClick={() => handleSendChatMessage()}
+                                    className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
+                                    disabled={!chatInput.trim()}
+                                >
+                                    <Send size={16}/>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* 下部：移動宣言エリア */}
+                        <div className="bg-white rounded-lg shadow-md p-4">
+                            <h4 className="text-lg font-semibold mb-3">移動宣言</h4>
+                            
+                            {isMyStandardTurn && !inStandardBattleBetting ? (
+                                <div className="space-y-3">
+                                    {/* ターン状態表示 */}
+                                    <div className="p-3 bg-green-50 rounded-lg text-center">
+                                        <p className="text-green-600 font-semibold">🟢 あなたのターン</p>
+                                        <p className="text-sm text-green-500">移動を選択してください</p>
+                                    </div>
+                                    
+                                    {/* 方向ボタン */}
+                                    <div className="grid grid-cols-3 gap-2 max-w-48 mx-auto">
+                                        <div></div>
+                                        <button 
+                                            onClick={() => handleStandardMoveImproved('up')}
+                                            className="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-lg flex items-center justify-center transition-colors shadow-md"
+                                            title="上に移動 (W キー)"
+                                        >
+                                            <ArrowUp size={20}/>
+                                        </button>
+                                        <div></div>
+                                        
+                                        <button 
+                                            onClick={() => handleStandardMoveImproved('left')}
+                                            className="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-lg flex items-center justify-center transition-colors shadow-md"
+                                            title="左に移動 (A キー)"
+                                        >
+                                            <ArrowLeft size={20}/>
+                                        </button>
+                                        <div className="bg-gray-200 rounded-lg p-3 flex items-center justify-center">
+                                            <User size={20} className="text-gray-500"/>
+                                        </div>
+                                        <button 
+                                            onClick={() => handleStandardMoveImproved('right')}
+                                            className="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-lg flex items-center justify-center transition-colors shadow-md"
+                                            title="右に移動 (D キー)"
+                                        >
+                                            <ArrowRight size={20}/>
+                                        </button>
+                                        
+                                        <div></div>
+                                        <button 
+                                            onClick={() => handleStandardMoveImproved('down')}
+                                            className="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-lg flex items-center justify-center transition-colors shadow-md"
+                                            title="下に移動 (S キー)"
+                                        >
+                                            <ArrowDown size={20}/>
+                                        </button>
+                                        <div></div>
+                                    </div>
+                                    
+                                    {/* キーボードヒント */}
+                                    <div className="text-center text-xs text-gray-500 bg-gray-50 p-2 rounded">
+                                        💡 キーボード: ↑↓←→ または WASD でも移動可能
+                                    </div>
+                                    
+                                    {/* プレイヤー情報 */}
+                                    <div className="pt-3 border-t">
+                                        <h5 className="font-semibold mb-2 text-sm">プレイヤー状況</h5>
+                                        <div className="space-y-2">
+                                            {gameData?.players?.map(playerId => {
+                                                const player = gameData.playerStates[playerId];
+                                                const isCurrentPlayer = playerId === userId;
+                                                const isActivePlayer = gameData.currentTurnPlayerId === playerId;
+                                                
+                                                return (
+                                                    <div 
+                                                        key={playerId}
+                                                        className={`p-2 rounded border text-sm ${
+                                                            isCurrentPlayer ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-gray-50'
+                                                        } ${isActivePlayer ? 'ring-2 ring-green-300' : ''}`}
+                                                    >
+                                                        <div className="flex items-center justify-between">
+                                                            <div className="flex items-center space-x-1">
+                                                                <User size={14} className={isCurrentPlayer ? 'text-blue-600' : 'text-gray-500'}/>
+                                                                <span className={`font-medium ${isCurrentPlayer ? 'text-blue-800' : 'text-gray-700'}`}>
+                                                                    {isCurrentPlayer ? 'あなた' : '相手'}
+                                                                </span>
+                                                                {isActivePlayer && (
+                                                                    <span className="bg-green-500 text-white text-xs px-1 py-0.5 rounded">
+                                                                        ターン中
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="text-right text-xs">
+                                                                <div>スコア: {player?.score || 0}pt</div>
+                                                                <div className="text-gray-500">
+                                                                    位置: ({player?.position?.r || 0}, {player?.position?.c || 0})
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        {/* ゴール状態表示 */}
+                                                        {player?.goalTime && (
+                                                            <div className="mt-1 flex items-center space-x-1">
+                                                                <Trophy size={12} className="text-yellow-500"/>
+                                                                <span className="text-xs text-yellow-600 font-semibold">ゴール達成！</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : inStandardBattleBetting ? (
+                                <div className="text-center p-4 bg-red-50 rounded-lg">
+                                    <Swords className="mx-auto mb-2 text-red-600" size={24}/>
+                                    <p className="text-red-600 font-semibold">バトル中</p>
+                                    <p className="text-sm text-red-500">移動はできません</p>
+                                </div>
+                            ) : (
+                                <div className="text-center p-4 bg-gray-50 rounded-lg">
+                                    <Clock className="mx-auto mb-2 text-gray-500" size={24}/>
+                                    <p className="text-gray-600 font-semibold">相手のターン</p>
+                                    <p className="text-sm text-gray-500">相手の移動を待っています...</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </div>
-            </div>
-            {gameData.status === "finished" && ( <button onClick={() => { setIsGameOverModalOpen(true); }} className="mt-6 bg-sky-500 hover:bg-sky-600 text-white font-bold py-3 px-6 rounded-lg text-lg"> 結果を見る </button> )}
+            ) : (
+                // エクストラモードのレイアウト（既存のまま）
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    {/* メイン迷路エリア */}
+                    <div className="lg:col-span-2">
+                        <div className="bg-white rounded-lg shadow-md p-4">
+                            <h2 className="text-lg font-semibold mb-4">
+                                迷路 (エクストラモード)
+                            </h2>
+
+                            {/* 迷路グリッド */}
+                            {mazeToPlayData ? (
+                                <MazeGrid
+                                    mazeData={mazeToPlayData}
+                                    playerPosition={myPlayerState?.position}
+                                    otherPlayers={gameData?.playerStates ? 
+                                        Object.entries(gameData.playerStates)
+                                            .filter(([pid]) => pid !== userId)
+                                            .map(([pid, pState]) => ({ id: pid, position: pState.position })) 
+                                        : []
+                                    }
+                                    revealedCells={myPlayerState?.revealedCells || {}}
+                                    revealedPlayerWalls={myPlayerState?.revealedWalls || []}
+                                    onCellClick={handleCellClick}
+                                    gridSize={currentGridSize}
+                                    sharedWalls={sharedWalls}
+                                    isSelectingMoveTarget={isSelectingMoveTarget}
+                                    selectingTrapCoord={isPlacingTrap}
+                                    onTrapCoordSelect={handleTrapCoordinateSelect}
+                                    traps={gameData?.traps || []}
+                                    highlightPlayer={true}
+                                    smallView={false}
+                                />
+                            ) : (
+                                <div className="flex items-center justify-center h-64 bg-gray-50 rounded">
+                                    <p className="text-gray-500">迷路を読み込み中...</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* サイドバー */}
+                    <div className="space-y-4">
+                        {/* エクストラモードのアクション */}
+                        <div className="bg-white rounded-lg shadow-md p-4"> 
+                            <h3 className="text-lg font-semibold mb-3">エクストラアクション</h3>
+                            
+                            {gameData?.currentExtraModePhase === 'declaration' && !myPlayerState?.hasDeclaredThisTurn && (
+                                <div className="space-y-3">
+                                    {/* 操作説明 */}
+                                    <div className="p-3 bg-blue-50 rounded-lg text-sm">
+                                        <p className="font-semibold text-blue-700 mb-2">📝 操作手順:</p>
+                                        <ul className="text-blue-600 space-y-1">
+                                            <li>• <strong>移動</strong>: 移動ボタン → 隣接セルクリック → 宣言</li>
+                                            <li>• <strong>待機</strong>: 待機ボタン → 宣言</li>
+                                        </ul>
+                                    </div>
+                                    
+                                    {/* アクションボタン */}
+                                    <div className="grid grid-cols-1 gap-2">
+                                        <ActionButton actionType="move" label="移動" icon={Move} currentSelection={selectedAction} onSelect={setSelectedAction} />
+                                        <ActionButton actionType="wait" label="待機" icon={Hourglass} currentSelection={selectedAction} onSelect={setSelectedAction} />
+                                    </div>
+                                    
+                                    {/* アクション詳細表示 */}
+                                    {renderActionDetails()}
+                                </div>
+                            )}
+                            
+                            {gameData?.currentExtraModePhase === 'declaration' && myPlayerState?.hasDeclaredThisTurn && (
+                                <div className="text-center p-4 bg-green-50 rounded-lg">
+                                    <CheckCircle className="mx-auto mb-2 text-green-600" size={24}/>
+                                    <p className="text-green-600 font-semibold">宣言完了</p>
+                                    <p className="text-sm text-green-500">他プレイヤーを待っています...</p>
+                                </div>
+                            )}
+
+                            {gameData?.currentExtraModePhase === 'actionExecution' && (
+                                <div className="p-4 bg-gray-50 rounded-lg">
+                                    <h4 className="font-semibold mb-2">アクション実行中</h4>
+                                    <p className="text-sm">
+                                        現在: {gameData.currentActionPlayerId === userId ? 
+                                            <span className="text-blue-600 font-semibold">あなた</span> : 
+                                            <span className="text-orange-600 font-semibold">相手</span>
+                                        }
+                                    </p>
+                                    {gameData.currentActionPlayerId === userId && myPlayerState.declaredAction && !myPlayerState.actionExecutedThisTurn && (
+                                        <p className="text-blue-600 mt-1 text-sm">アクションを実行中...</p>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* プレイヤー情報 */}
+                        <div className="bg-white rounded-lg shadow-md p-4">
+                            <h3 className="text-lg font-semibold mb-3">プレイヤー情報</h3>
+                            <div className="space-y-2">
+                                {gameData?.players?.map(playerId => {
+                                    const player = gameData.playerStates[playerId];
+                                    const isCurrentPlayer = playerId === userId;
+                                    const isActivePlayer = gameData.currentActionPlayerId === playerId;
+                                    
+                                    return (
+                                        <div 
+                                            key={playerId}
+                                            className={`p-3 rounded-lg border-2 ${
+                                                isCurrentPlayer ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-gray-50'
+                                            } ${isActivePlayer ? 'ring-2 ring-green-300' : ''}`}
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center space-x-2">
+                                                    <User size={16} className={isCurrentPlayer ? 'text-blue-600' : 'text-gray-500'}/>
+                                                    <span className={`font-medium ${isCurrentPlayer ? 'text-blue-800' : 'text-gray-700'}`}>
+                                                        {isCurrentPlayer ? 'あなた' : `プレイヤー ${playerId.substring(0, 8)}...`}
+                                                    </span>
+                                                    {isActivePlayer && (
+                                                        <span className="bg-green-500 text-white text-xs px-2 py-1 rounded-full">
+                                                            実行中
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="text-right text-sm">
+                                                    <div>スコア: {player?.score || 0}pt</div>
+                                                    <div className="text-xs text-gray-500">
+                                                        位置: ({player?.position?.r || 0}, {player?.position?.c || 0})
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            
+                                            {/* ゴール状態表示 */}
+                                            {player?.goalTime && (
+                                                <div className="mt-2 flex items-center space-x-1">
+                                                    <Trophy size={14} className="text-yellow-500"/>
+                                                    <span className="text-sm text-yellow-600 font-semibold">ゴール達成！</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+
+                        {/* チャットエリア */}
+                        <div className="bg-white rounded-lg shadow-md p-4">
+                            <h4 className="text-lg font-semibold mb-3 flex items-center">
+                                <MessageSquare size={18} className="mr-2"/> チャット
+                            </h4>
+                            <div ref={chatLogRef} className="bg-gray-50 p-3 rounded-lg h-32 overflow-y-auto text-sm mb-3 border">
+                                {chatMessages.map(msg => (
+                                    <div key={msg.id} className={`mb-2 ${msg.senderId === 'system' ? 'text-blue-600 font-semibold' : ''}`}>
+                                        <span className="font-medium">{msg.senderName}:</span> {msg.text}
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="flex space-x-2">
+                                <input 
+                                    type="text" 
+                                    value={chatInput} 
+                                    onChange={(e) => setChatInput(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleSendChatMessage()}
+                                    className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="メッセージを入力..."
+                                />
+                                <button 
+                                    onClick={() => handleSendChatMessage()}
+                                    className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
+                                    disabled={!chatInput.trim()}
+                                >
+                                    <Send size={16}/>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* モーダル */}
+            {isBattleModalOpen && (
+                <BattleModal
+                    isOpen={isBattleModalOpen}
+                    onClose={() => setIsBattleModalOpen(false)}
+                    gameData={gameData}
+                    userId={userId}
+                    opponentId={battleOpponentId}
+                    onBet={handleStandardBattleBet}
+                />
+            )}
+
+            {isGameOverModalOpen && (
+                <GameOverModal
+                    isOpen={isGameOverModalOpen}
+                    onClose={() => setIsGameOverModalOpen(false)}
+                    gameData={gameData}
+                    userId={userId}
+                    onReturnToLobby={() => setScreen('lobby')}
+                />
+            )}
         </div>
     );
 };
 
-function App() { /* ... (same as previous version) ... */ 
-    const [screen, setScreen] = useState('lobby'); const [userId, setUserId] = useState(null); const [isAuthReady, setIsAuthReady] = useState(false); const [gameMode, setGameMode] = useState('2player'); 
-    useEffect(() => { const initAuth = async () => { try { onAuthStateChanged(auth, async (user) => { if (user) setUserId(user.uid); else { if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) { try { await signInWithCustomToken(auth, __initial_auth_token); } catch (customTokenError) { console.error("Error signing in with custom token, falling back to anonymous:", customTokenError); await signInAnonymously(auth); } } else { await signInAnonymously(auth); } } setIsAuthReady(true); }); } catch (error) { console.error("Firebase Auth Error:", error); setIsAuthReady(true);  } }; initAuth(); }, []);
-    useEffect(() => { if(isAuthReady && userId) { const storedGameId = localStorage.getItem('labyrinthGameId'); if (storedGameId) { const gameDocRef = doc(db, `artifacts/${appId}/public/data/labyrinthGames`, storedGameId); getDoc(gameDocRef).then(docSnap => { if (docSnap.exists()) { const game = docSnap.data(); if (!game.players || !game.players.includes(userId)) { localStorage.removeItem('labyrinthGameId'); localStorage.removeItem('labyrinthGameType'); return; } setGameMode(game.mode); if (game.status === "creating") setScreen('courseCreation'); else if (game.status === "playing" || game.status === "finished" || (game.gameType === "extra" && game.currentExtraModePhase)) setScreen('play'); else { localStorage.removeItem('labyrinthGameId'); localStorage.removeItem('labyrinthGameType'); } } else { localStorage.removeItem('labyrinthGameId'); localStorage.removeItem('labyrinthGameType'); } }).catch(error => { console.error("Error checking for existing game:", error); localStorage.removeItem('labyrinthGameId'); localStorage.removeItem('labyrinthGameType'); }); } } }, [isAuthReady, userId]);
-    if (!isAuthReady) return <div className="flex items-center justify-center min-h-screen bg-slate-800 text-white text-xl">認証情報を読み込み中...</div>;
-    if (!userId && isAuthReady) return <div className="flex items-center justify-center min-h-screen bg-slate-800 text-white text-xl">認証に失敗。リロードしてください。</div>;
-    switch (screen) { case 'courseCreation': return <CourseCreationScreen userId={userId} setScreen={setScreen} gameMode={gameMode} />; case 'play': return <PlayScreen userId={userId} setScreen={setScreen} gameMode={gameMode}  />; default: return <LobbyScreen setGameMode={setGameMode} setScreen={setScreen} userId={userId} />; }
-}
-export default App;
+export default PlayScreen;

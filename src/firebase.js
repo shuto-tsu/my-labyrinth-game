@@ -1,22 +1,31 @@
-// src/firebase.js
+/**
+ * Firebase設定ファイル
+ * Firebase認証とFirestoreデータベースの初期化を行う
+ */
+
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
-// Firebase config (IMPORTANT: Replace with your actual config if not using __firebase_config)
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-    apiKey: "YOUR_API_KEY", // Replace if __firebase_config is not available
-    authDomain: "YOUR_AUTH_DOMAIN",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_STORAGE_BUCKET",
-    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-    appId: "YOUR_APP_ID"
+// Firebase設定オブジェクト
+// プロジェクトごとに異なる設定値を含む
+const firebaseConfig = {
+  apiKey: "AIzaSyDELpL-KPlPpxAxondBu6WMPncmmtcZHs8",
+  authDomain: "my-labyrinth-game.firebaseapp.com",
+  projectId: "my-labyrinth-game",
+  storageBucket: "my-labyrinth-game.firebasestorage.app",
+  messagingSenderId: "387163715938",
+  appId: "1:387163715938:web:5d1cc5f6b5075f41f2143b"
 };
 
-// Initialize Firebase
+// Firebase アプリケーションの初期化
 const app = initializeApp(firebaseConfig);
+
+// Firebase Auth インスタンスを取得・エクスポート
 export const auth = getAuth(app);
+
+// Firestore データベースインスタンスを取得・エクスポート
 export const db = getFirestore(app);
 
-// App ID (IMPORTANT: Use __app_id if available, otherwise provide a default)
-export const appId = typeof __app_id !== 'undefined' ? __app_id : 'labyrinth-default-app';
+// アプリケーションIDを設定からエクスポート
+export const appId = firebaseConfig.appId;

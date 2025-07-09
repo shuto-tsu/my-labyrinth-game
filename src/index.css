@@ -1,0 +1,49 @@
+/* 
+ * グローバルCSSスタイルファイル
+ * TailwindCSSとアプリケーション全体のスタイルを定義
+ */
+
+/* TailwindCSSのベーススタイル、コンポーネント、ユーティリティを読み込み */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* プロジェクト固有の追加のグローバルスタイルがあればここに記述 */
+
+/* bodyタグのデフォルトスタイル設定 */
+body {
+  margin: 0;
+  /* システムフォントスタックを使用してクロスプラットフォーム対応 */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  /* フォントのアンチエイリアシングを設定 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* 背景色を薄いグレーに設定 */
+  background-color: #f3f4f6; /* Tailwind bg-gray-100 */
+}
+
+/* スクロールバーのカスタマイズ（Webkit系ブラウザ向け） */
+/* スクロールバーの幅と高さを設定 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+/* スクロールバーのトラック（背景）のスタイル */
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 10px;
+}
+
+/* スクロールバーのつまみのスタイル */
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 10px;
+}
+
+/* スクロールバーのつまみにホバー時のスタイル */
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}

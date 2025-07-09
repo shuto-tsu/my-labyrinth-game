@@ -1,11 +1,24 @@
-// src/components/GameOverModal.jsx
+/**
+ * ゲーム終了モーダルコンポーネント
+ * ゲーム終了時に最終結果とランキングを表示するモーダル
+ */
+
 import React from 'react';
 import { Trophy, CheckCircle, XCircle, TimerIcon } from 'lucide-react';
 import { EXTRA_MODE_PERSONAL_TIME_LIMIT, PERSONAL_TIME_PENALTY_INTERVAL, PERSONAL_TIME_PENALTY_POINTS } from '../constants';
 
+/**
+ * ゲーム終了モーダルコンポーネント
+ * @param {boolean} isOpen - モーダルの開閉状態
+ * @param {Object} gameData - ゲームデータ
+ * @param {string} userId - 現在のユーザーID
+ * @param {Function} onClose - モーダルを閉じる関数
+ */
 const GameOverModal = ({ isOpen, gameData, userId, onClose }) => {
+    // モーダルが閉じているか必要なデータがない場合は何も表示しない
     if (!isOpen || !gameData || !gameData.playerStates) return null;
 
+    // プレイヤーをランキング順にソート
     const sortedPlayers = (gameData.players || [])
         .map(pid => ({ id: pid, ...gameData.playerStates[pid] }))
         .sort((a, b) => (a.rank || Infinity) - (b.rank || Infinity) || (b.score || 0) - (a.score || 0));

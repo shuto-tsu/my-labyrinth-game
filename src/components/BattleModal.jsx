@@ -1,19 +1,38 @@
-// src/components/BattleModal.jsx
+/**
+ * 戦闘モーダルコンポーネント
+ * プレイヤー同士の戦闘時に賭け金を設定するモーダル
+ */
+
 import React, { useState, useEffect } from 'react';
 import { Swords, MinusCircle, PlusCircle } from 'lucide-react';
 
+/**
+ * 戦闘モーダルコンポーネント
+ * @param {boolean} isOpen - モーダルの開閉状態
+ * @param {Function} onClose - モーダルを閉じる関数
+ * @param {Function} onBet - 賭け金を決定する関数
+ * @param {number} maxBet - 最大賭け金
+ * @param {string} opponentName - 相手の名前
+ * @param {string} myName - 自分の名前
+ * @param {number} myCurrentScore - 現在のスコア
+ */
 const BattleModal = ({ isOpen, onClose, onBet, maxBet, opponentName, myName, myCurrentScore }) => {
-    const [betAmount, setBetAmount] = useState(1);
+    const [betAmount, setBetAmount] = useState(1);  // 賭け金の状態管理
 
+    // モーダルが開いた時の初期化処理
     useEffect(() => {
         if (isOpen) {
-            setBetAmount(1); // Reset bet on open
+            setBetAmount(1); // 開いた時に賭け金をリセット
         }
     }, [isOpen]);
 
+    // モーダルが閉じている場合は何も表示しない
     if (!isOpen) return null;
 
-    const actualMaxBet = Math.max(1, myCurrentScore); // Can always bet 1, even if score is 0 or less.
+    // 実際の最大賭け金を計算（最低1は賭けられる）
+    const actualMaxBet = Math.max(1, myCurrentScore);
+    
+    // 賭け金を増減する関数
     const incrementBet = () => setBetAmount(prev => Math.min(prev + 1, actualMaxBet));
     const decrementBet = () => setBetAmount(prev => Math.max(1, prev - 1));
 
