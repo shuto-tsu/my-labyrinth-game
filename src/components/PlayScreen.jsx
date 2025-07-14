@@ -16,7 +16,7 @@ import {
     Megaphone, MicOff, Trophy
 } from 'lucide-react';
 
-import { db, appId } from '../firebaseconnection';
+import { db, appId } from '../firebase';
 import MazeGrid from './MazeGrid';
 import BattleModal from './BattleModal';
 import GameOverModal from './GameOverModal';
